@@ -3,13 +3,11 @@ import os
 import streamlit as st
 from sweatstack.streamlit import StreamlitAuth
 
+APP_URL = os.getenv("APP_URL", "http://localhost:8080")
 
 st.title("SweatStack Streamlit template")
 
-headers = st.context.headers
-token = headers.get("SweatStack-Access-Token")
-
-auth = StreamlitAuth.behind_proxy(redirect_uri="http://localhost:8080/auth/callback")
+auth = StreamlitAuth.behind_proxy(redirect_uri=f"{APP_URL}/auth/callback")
 auth.authenticate(show_logout=False)
 
 if not auth.is_authenticated():

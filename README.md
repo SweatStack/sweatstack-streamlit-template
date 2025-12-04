@@ -89,6 +89,7 @@ The `make serve` command mounts the current directory, so changes to `streamlit_
 | `SWEATSTACK_CLIENT_ID` | OAuth client ID from SweatStack | Yes |
 | `SWEATSTACK_CLIENT_SECRET` | OAuth client secret from SweatStack | Yes |
 | `SECRET_KEY` | Secret key for encrypting cookies (min 32 chars) | Yes |
+| `APP_URL` | Public URL of the application (used for OAuth redirect) | No (default: `http://localhost:8080`) |
 | `HTTPS_ONLY` | Set cookie secure flag (`true` for production, `false` for local dev) | No (default: `true`) |
 | `UPSTREAM_URL` | Internal Streamlit URL | No (default: `http://localhost:8501`) |
 
