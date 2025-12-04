@@ -8,23 +8,18 @@ ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_INSTALL_DIR=/python
 ENV UV_PYTHON_PREFERENCE=only-managed
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends supervisor && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN uv python install 3.13
 
-ADD . /app
 WORKDIR /app
+COPY pyproject.toml uv.lock ./
+
 RUN uv venv
 RUN uv sync --locked
 
-# System deps: curl for uv installer, and supervisor
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl supervisor && \
-    rm -rf /var/lib/apt/lists/*
-
-
-# Copy project metadata first (better Docker cache)
-COPY pyproject.toml .
-
-# Copy application code & supervisord config
 COPY streamlit_app.py proxy.py supervisord.conf ./
 
 EXPOSE 8080
