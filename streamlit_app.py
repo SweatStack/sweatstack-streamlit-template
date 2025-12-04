@@ -1,35 +1,30 @@
 import os
 
 import streamlit as st
-import sweatstack
+from sweatstack.streamlit import StreamlitAuth
 
 
-st.title("SweatStack prototype – Streamlit behind FastAPI proxy")
+st.title("SweatStack Streamlit template")
 
-headers = st.context.headers  # Streamlit 1.41+ style contextual headers
-
-st.subheader("Incoming request headers (as seen by Streamlit)")
-st.json(headers)
-
+headers = st.context.headers
 token = headers.get("SweatStack-Access-Token")
 
-if not token:
-    st.warning("Not authenticated – no SweatStack-Access-Token header found.")
-    st.markdown(
-        """
-        <p>
-        <a href="/login">Login with your OIDC provider</a>
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-else:
-    st.success("Authenticated!")
-    st.write("SweatStack-Access-Token:", token[:20] + "..." if len(token) > 20 else token)
+auth = StreamlitAuth(
+    client_id="YOUR_APPLICATION_ID",
+    client_secret="YOUR_APPLICATION_SECRET",
+    redirect_uri="http://localhost:8501",
+)
+auth._set_api_key(token)
+
+if not auth.is_authenticated():
+    st.write("Please log in to continue")
+    st.stop()
 
 
-os.environ["SWEATSTACK_API_KEY"] = token
+with st.sidebar:
+    auth.select_user()
 
-activity = sweatstack.get_latest_activity()
 
-st.write(activity)
+st.write("Welcome to SweatStack")
+latest_activity = auth.client.get_latest_activity()
+st.write(f"Latest activity: {latest_activity.sport.display_name()} on {latest_activity.start}")
