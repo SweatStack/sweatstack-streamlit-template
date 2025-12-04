@@ -20,6 +20,14 @@ with st.sidebar:
     auth.select_user()
 
 
-st.write("Welcome to SweatStack")
-latest_activity = auth.client.get_latest_activity()
-st.write(f"Latest activity: {latest_activity.sport.display_name()} on {latest_activity.start}")
+activity = auth.select_activity()
+
+data = auth.client.get_activity_data(activity.id)
+
+if data is None or data.empty:
+    st.warning("No data available")
+    st.stop()
+
+available_columns = [col for col in data.columns if col not in ["duration", "lap"]]
+metric = st.selectbox("Select the column to plot", available_columns)
+st.line_chart(data[metric])
