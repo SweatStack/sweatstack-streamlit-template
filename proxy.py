@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://localhost:8501")
+APP_URL = os.getenv("APP_URL", "http://localhost:8080")
 SWEATSTACK_BASE_URL = "https://app.sweatstack.no"
 SWEATSTACK_AUTHORIZE_URL = f"{SWEATSTACK_BASE_URL}/oauth/authorize"
 SWEATSTACK_TOKEN_URL = f"{SWEATSTACK_BASE_URL}/api/v1/oauth/token"
@@ -195,7 +196,7 @@ def _set_state_cookie(response: Response, state: str) -> None:
 async def login(request: Request):
     """Initiate OAuth2 login with SweatStack."""
     state = secrets.token_urlsafe(32)
-    redirect_uri = str(request.url_for("auth_callback"))
+    redirect_uri = f"{APP_URL}/auth/callback"
 
     params = {
         "client_id": SWEATSTACK_CLIENT_ID,
@@ -230,7 +231,7 @@ async def auth_callback(request: Request):
         return RedirectResponse(url="/login")
 
     # Exchange code for tokens
-    redirect_uri = str(request.url_for("auth_callback"))
+    redirect_uri = f"{APP_URL}/auth/callback"
     async with httpx.AsyncClient() as client:
         token_response = await client.post(
             SWEATSTACK_TOKEN_URL,

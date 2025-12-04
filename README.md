@@ -113,6 +113,42 @@ For production:
 2. Deploy behind HTTPS (required for secure cookies)
 3. Update the redirect URI in your SweatStack application settings
 
+### Deploying to Fly.io
+
+Make sure you have the [Fly.io CLI](https://fly.io/docs/flyctl/) installed.
+
+Start by creating a `fly.toml` file for your app using this command:
+```bash
+fly launch --no-deploy
+```
+
+Create a new `.env.production` file based on the `.env.template` file.
+```bash
+cp .env.template .env.production
+```
+
+Import the environment variables as secrets into Fly.io:
+```bash
+cat .env.production > fly secrets import
+```
+
+Then do an initial deploy of your app to get a URL:
+```bash
+fly deploy
+```
+
+When you app is deployed, retrieve your app's url from the output of the previous command.
+
+Set this url as the `APP_URL` environment variable in your `.env.production` file and run these commands again to update the secrets and redeploy your app:
+```bash
+cat .env.production > fly secrets import
+
+fly deploy
+```
+
+Finally, set your app's url as an allowed redirect URI in your [SweatStack application settings](https://app.sweatstack.no/settings/api).
+
+
 ## License
 
 See [LICENSE](LICENSE) for the license of the code in this repository.
