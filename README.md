@@ -129,7 +129,7 @@ cp .env.template .env.production
 
 Import the environment variables as secrets into Fly.io:
 ```bash
-cat .env.production > fly secrets import
+cat .env.production | fly secrets import
 ```
 
 Then do an initial deploy of your app to get a URL:
@@ -137,17 +137,16 @@ Then do an initial deploy of your app to get a URL:
 fly deploy
 ```
 
-When you app is deployed, retrieve your app's url from the output of the previous command.
+When you app is deployed, retrieve your app's url from the output of the previous command. (it should look something like `https://your-app-name.fly.dev`)
 
 Set this url as the `APP_URL` environment variable in your `.env.production` file and run these commands again to update the secrets and redeploy your app:
 ```bash
 cat .env.production > fly secrets import
-
-fly deploy
 ```
 
 Finally, set your app's url as an allowed redirect URI in your [SweatStack application settings](https://app.sweatstack.no/settings/api).
 
+When you make changes to your app, just run the `fly deploy` command again to redeploy your app.
 
 ## License
 
