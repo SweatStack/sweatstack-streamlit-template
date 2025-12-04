@@ -19,13 +19,13 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 logger = logging.getLogger(__name__)
 
 # Configuration
-UPSTREAM_HTTP = os.getenv("UPSTREAM_HTTP", "http://127.0.0.1:8501")
+UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://127.0.0.1:8501")
 SWEATSTACK_BASE_URL = "https://app.sweatstack.no"
 SWEATSTACK_AUTHORIZE_URL = f"{SWEATSTACK_BASE_URL}/oauth/authorize"
 SWEATSTACK_TOKEN_URL = f"{SWEATSTACK_BASE_URL}/api/v1/oauth/token"
 
-OIDC_CLIENT_ID = os.getenv("SWEATSTACK_CLIENT_ID")
-OIDC_CLIENT_SECRET = os.getenv("SWEATSTACK_CLIENT_SECRET")
+SWEATSTACK_CLIENT_ID = os.getenv("SWEATSTACK_CLIENT_ID")
+SWEATSTACK_CLIENT_SECRET = os.getenv("SWEATSTACK_CLIENT_SECRET")
 
 TOKEN_COOKIE_NAME = "sweatstack_tokens"
 TOKEN_REFRESH_THRESHOLD_SECONDS = 20
@@ -98,8 +98,8 @@ async def _refresh_access_token(refresh_token: str) -> TokenData | None:
             data={
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
-                "client_id": OIDC_CLIENT_ID,
-                "client_secret": OIDC_CLIENT_SECRET,
+                "client_id": SWEATSTACK_CLIENT_ID,
+                "client_secret": SWEATSTACK_CLIENT_SECRET,
             },
         )
         if response.status_code == 200:
@@ -144,7 +144,7 @@ async def _get_valid_token(cookies: dict[str, str]) -> tuple[str | None, str | N
 
 def _build_upstream_url(path: str, query_string: str) -> str:
     """Build full upstream URL from path and query string."""
-    base = UPSTREAM_HTTP.rstrip("/")
+    base = UPSTREAM_URL.rstrip("/")
     url = f"{base}/{path}" if path else f"{base}/"
     if query_string:
         url = f"{url}?{query_string}"
@@ -153,7 +153,7 @@ def _build_upstream_url(path: str, query_string: str) -> str:
 
 def _build_upstream_ws_url(path: str) -> str:
     """Build upstream WebSocket URL from path."""
-    base_ws = UPSTREAM_HTTP.replace("http://", "ws://").replace("https://", "wss://")
+    base_ws = UPSTREAM_URL.replace("http://", "ws://").replace("https://", "wss://")
     return f"{base_ws.rstrip('/')}/{path}" if path else f"{base_ws.rstrip('/')}/"
 
 
@@ -169,8 +169,8 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 oauth = OAuth()
 oauth.register(
     name="sweatstack",
-    client_id=OIDC_CLIENT_ID,
-    client_secret=OIDC_CLIENT_SECRET,
+    client_id=SWEATSTACK_CLIENT_ID,
+    client_secret=SWEATSTACK_CLIENT_SECRET,
     authorize_url=SWEATSTACK_AUTHORIZE_URL,
     access_token_url=SWEATSTACK_TOKEN_URL,
     client_kwargs={"scope": "data:read,profile"},
