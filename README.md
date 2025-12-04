@@ -8,7 +8,12 @@ A template for building [Streamlit](https://streamlit.io/) applications with [Sw
 
 ## Quick Start
 
-### 1. Create a SweatStack Application
+### 1. Copy this template repository
+
+Copy this repository to your own GitHub account by clicking the big green "Use this template" button at the top right of this page.
+More info about using template repositories can be found [here](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
+
+### 2. Create a SweatStack Application
 
 Create a new application [here](https://app.sweatstack.no/applications/new).
 
@@ -18,7 +23,7 @@ Set the redirect URI to your callback URL:
 
 Note down your **Client ID** and **Client Secret** for the next step.
 
-### 2. Configure Environment
+### 3. Configure Environment
 
 Copy the environment template:
 
@@ -43,7 +48,7 @@ openssl rand -base64 32
 
 Paste the generated key into the `SECRET_KEY` environment variable in your `.env` file.
 
-### 3. Build and Run
+### 4. Build and Run
 
 ```bash
 # Build the Docker image
