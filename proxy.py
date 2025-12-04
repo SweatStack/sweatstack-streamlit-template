@@ -142,19 +142,28 @@ async def _get_valid_token(cookies: dict[str, str]) -> tuple[str | None, str | N
     return access_token, None
 
 
-def _build_upstream_url(path: str, query_string: str) -> str:
-    """Build full upstream URL from path and query string."""
+def _build_upstream_url(path: str, query_string: str = "", websocket: bool = False) -> str:
+    """Build upstream URL from path and optional query string."""
     base = UPSTREAM_URL.rstrip("/")
+    if websocket:
+        base = base.replace("http://", "ws://").replace("https://", "wss://")
     url = f"{base}/{path}" if path else f"{base}/"
     if query_string:
         url = f"{url}?{query_string}"
     return url
 
 
-def _build_upstream_ws_url(path: str) -> str:
-    """Build upstream WebSocket URL from path."""
-    base_ws = UPSTREAM_URL.replace("http://", "ws://").replace("https://", "wss://")
-    return f"{base_ws.rstrip('/')}/{path}" if path else f"{base_ws.rstrip('/')}/"
+def _prepare_upstream_headers(
+    incoming_headers: dict[str, str] | None,
+    token: str | None,
+) -> dict[str, str]:
+    """Prepare headers for upstream request, injecting auth token if available."""
+    headers = dict(incoming_headers) if incoming_headers else {}
+    headers.pop("host", None)
+    headers.pop("accept-encoding", None)
+    if token:
+        headers["SweatStack-Access-Token"] = token
+    return headers
 
 
 def _filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -221,14 +230,8 @@ async def http_proxy(full_path: str, request: Request) -> Response:
     query_string = request.scope.get("query_string", b"").decode()
     upstream_url = _build_upstream_url(full_path, query_string)
 
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("accept-encoding", None)
-
     token, new_cookie = await _get_valid_token(request.cookies)
-    if token:
-        headers["SweatStack-Access-Token"] = token
-
+    headers = _prepare_upstream_headers(dict(request.headers), token)
     body = await request.body()
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -256,15 +259,14 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
     """Proxy WebSocket connections to upstream with auth token."""
     await websocket.accept()
 
-    upstream_ws_url = _build_upstream_ws_url(full_path)
-    token, _ = await _get_valid_token(websocket.cookies)
+    query_string = websocket.scope.get("query_string", b"").decode()
+    upstream_url = _build_upstream_url(full_path, query_string, websocket=True)
 
-    additional_headers: dict[str, str] = {}
-    if token:
-        additional_headers["SweatStack-Access-Token"] = token
+    token, _ = await _get_valid_token(websocket.cookies)
+    headers = _prepare_upstream_headers(None, token)
 
     try:
-        async with ws_connect(upstream_ws_url, additional_headers=additional_headers) as upstream:
+        async with ws_connect(upstream_url, additional_headers=headers) as upstream:
 
             async def client_to_upstream():
                 try:
