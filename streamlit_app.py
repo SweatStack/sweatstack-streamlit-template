@@ -9,12 +9,8 @@ st.title("SweatStack Streamlit template")
 headers = st.context.headers
 token = headers.get("SweatStack-Access-Token")
 
-auth = StreamlitAuth(
-    client_id="YOUR_APPLICATION_ID",
-    client_secret="YOUR_APPLICATION_SECRET",
-    redirect_uri="http://localhost:8501",
-)
-auth._set_api_key(token)
+auth = StreamlitAuth.behind_proxy(redirect_uri="http://localhost:8080/auth/callback")
+auth.authenticate(show_logout=False)
 
 if not auth.is_authenticated():
     st.write("Please log in to continue")
@@ -22,6 +18,7 @@ if not auth.is_authenticated():
 
 
 with st.sidebar:
+    auth.logout_button()
     auth.select_user()
 
 

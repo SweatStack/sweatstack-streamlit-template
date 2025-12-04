@@ -1063,7 +1063,7 @@ wheels = [
 
 [[package]]
 name = "sweatstack"
-version = "0.56.0"
+version = "0.57.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "email-validator" },
@@ -1073,9 +1073,9 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/d0/7da62625256706c05a4528c6f5471dc9a287fb12d84a1c6c283b06506d77/sweatstack-0.56.0.tar.gz", hash = "sha256:7988fe347e70ab9893960e8c6e3409d8c14c712f8670c0392bf9ac55512e8357", size = 4001612, upload-time = "2025-11-21T13:50:02.132Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/0a/9b5ead97188ac0439806966b71967f0254c1e7dbce6b4fee801d873630de/sweatstack-0.57.0.tar.gz", hash = "sha256:3131ea81d91bc3d59669e553e7493cdb78342ae3bd783255406d9313dc1eb073", size = 4002091, upload-time = "2025-12-04T11:44:53.792Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/2d/24f1311f12630c013a65f4b0c04fb065afed13986061a96ec48dc1fca79c/sweatstack-0.56.0-py3-none-any.whl", hash = "sha256:e5c33e3926814676caa27bd3040dddc78a0c798ec4b98a6201c7f79414a25134", size = 1981018, upload-time = "2025-11-21T13:50:00.188Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/20/0b7bb74d130f8762fd1c627d8f4f78f9d2bdfe0e4297961f2e66eb98ce3b/sweatstack-0.57.0-py3-none-any.whl", hash = "sha256:77a60f164e88e5a719994c2fad899041fc07d9a0767e518e5f713324b66fe7e3", size = 1981571, upload-time = "2025-12-04T11:44:51.24Z" },
 ]
 
 [package.optional-dependencies]
@@ -1105,7 +1105,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.123.7" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
-    { name = "sweatstack", extras = ["streamlit"], specifier = ">=0.56.0" },
+    { name = "sweatstack", extras = ["streamlit"], specifier = ">=0.57.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.38.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]

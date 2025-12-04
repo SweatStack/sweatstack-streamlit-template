@@ -4,22 +4,22 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
-from authlib.integrations.starlette_client import OAuth
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse, Response
-from starlette.middleware.sessions import SessionMiddleware
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 logger = logging.getLogger(__name__)
 
 # Configuration
-UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://127.0.0.1:8501")
+UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://localhost:8501")
 SWEATSTACK_BASE_URL = "https://app.sweatstack.no"
 SWEATSTACK_AUTHORIZE_URL = f"{SWEATSTACK_BASE_URL}/oauth/authorize"
 SWEATSTACK_TOKEN_URL = f"{SWEATSTACK_BASE_URL}/api/v1/oauth/token"
@@ -35,6 +35,8 @@ DEFAULT_TOKEN_EXPIRY_SECONDS = 15 * 60
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY environment variable is required")
+
+HTTPS_ONLY = os.getenv("HTTPS_ONLY", "true").lower() == "true"
 
 HOP_BY_HOP_HEADERS = frozenset({
     "connection",
@@ -84,7 +86,7 @@ def _set_token_cookie(response: Response, cookie_value: str) -> None:
         TOKEN_COOKIE_NAME,
         cookie_value,
         httponly=True,
-        secure=True,
+        secure=HTTPS_ONLY,
         samesite="lax",
         max_age=COOKIE_MAX_AGE_SECONDS,
     )
@@ -162,7 +164,7 @@ def _prepare_upstream_headers(
     headers.pop("host", None)
     headers.pop("accept-encoding", None)
     if token:
-        headers["SweatStack-Access-Token"] = token
+        headers["X-SweatStack-Token"] = token
     return headers
 
 
@@ -173,35 +175,85 @@ def _filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
 
 # FastAPI app
 app = FastAPI()
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
-oauth = OAuth()
-oauth.register(
-    name="sweatstack",
-    client_id=SWEATSTACK_CLIENT_ID,
-    client_secret=SWEATSTACK_CLIENT_SECRET,
-    authorize_url=SWEATSTACK_AUTHORIZE_URL,
-    access_token_url=SWEATSTACK_TOKEN_URL,
-    client_kwargs={"scope": "data:read,profile"},
-)
+STATE_COOKIE_NAME = "oauth_state"
+
+
+def _set_state_cookie(response: Response, state: str) -> None:
+    """Set the OAuth state cookie."""
+    response.set_cookie(
+        STATE_COOKIE_NAME,
+        state,
+        httponly=True,
+        secure=HTTPS_ONLY,
+        samesite="lax",
+        max_age=600,  # 10 minutes
+    )
 
 
 @app.get("/login")
 async def login(request: Request):
     """Initiate OAuth2 login with SweatStack."""
-    redirect_uri = request.url_for("auth_callback")
-    return await oauth.sweatstack.authorize_redirect(request, redirect_uri)
+    state = secrets.token_urlsafe(32)
+    redirect_uri = str(request.url_for("auth_callback"))
+
+    params = {
+        "client_id": SWEATSTACK_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "data:read,profile",
+        "state": state,
+        "prompt": "none",
+    }
+    auth_url = f"{SWEATSTACK_AUTHORIZE_URL}?{urlencode(params)}"
+
+    response = RedirectResponse(url=auth_url)
+    _set_state_cookie(response, state)
+    logger.info("Login initiated, redirect_uri=%s", redirect_uri)
+    return response
 
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
     """Handle OAuth callback and store tokens in encrypted cookie."""
-    token = await oauth.sweatstack.authorize_access_token(request)
-    access_token = token.get("access_token")
-    refresh_token = token.get("refresh_token")
-    expires_in = token.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
+    # Verify state
+    state_from_cookie = request.cookies.get(STATE_COOKIE_NAME)
+    state_from_params = request.query_params.get("state")
+
+    if not state_from_cookie or state_from_cookie != state_from_params:
+        logger.warning("State mismatch: cookie=%s, param=%s", state_from_cookie, state_from_params)
+        return RedirectResponse(url="/login")
+
+    code = request.query_params.get("code")
+    if not code:
+        logger.warning("No authorization code received")
+        return RedirectResponse(url="/login")
+
+    # Exchange code for tokens
+    redirect_uri = str(request.url_for("auth_callback"))
+    async with httpx.AsyncClient() as client:
+        token_response = await client.post(
+            SWEATSTACK_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": SWEATSTACK_CLIENT_ID,
+                "client_secret": SWEATSTACK_CLIENT_SECRET,
+            },
+        )
+
+    if token_response.status_code != 200:
+        logger.warning("Token exchange failed: %s", token_response.text)
+        return RedirectResponse(url="/login")
+
+    token_data = token_response.json()
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
 
     response = RedirectResponse(url="/")
+    response.delete_cookie(STATE_COOKIE_NAME)
 
     if access_token:
         expires_at = time.time() + expires_in
@@ -279,10 +331,9 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
                             elif "bytes" in message:
                                 await upstream.send(message["bytes"])
                         elif msg_type == "websocket.disconnect":
-                            await upstream.close()
                             break
                 except WebSocketDisconnect:
-                    await upstream.close()
+                    pass
 
             async def upstream_to_client():
                 try:
@@ -293,10 +344,8 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
                         else:
                             await websocket.send_bytes(data)
                 except (ConnectionClosedOK, ConnectionClosedError):
-                    await websocket.close()
+                    pass
 
             await asyncio.gather(client_to_upstream(), upstream_to_client())
     except Exception:
         logger.exception("WebSocket proxy error")
-    finally:
-        await websocket.close()

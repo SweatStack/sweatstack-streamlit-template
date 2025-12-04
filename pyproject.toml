@@ -10,7 +10,7 @@ dependencies = [
     "fastapi>=0.123.7",
     "httpx[http2]>=0.28.1",
     "itsdangerous>=2.2.0",
-    "sweatstack[streamlit]>=0.56.0",
+    "sweatstack[streamlit]>=0.57.0",
     "uvicorn[standard]>=0.38.0",
     "websockets>=15.0.1",
 ]
