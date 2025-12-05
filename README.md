@@ -1,9 +1,10 @@
 # SweatStack Streamlit Template
 
 A template for building [Streamlit](https://streamlit.io/) applications with [SweatStack](https://sweatstack.no/).
+Example deployment can be found [here](https://sweatstack-streamlit-template.fly.dev/).
 
 > [!IMPORTANT]
-> The code in this repository is provided as-is, without warranty or guarantees of any kind. Use at your own risk.
+> The content in this repository is provided as-is, without warranty or guarantees of any kind. Use at your own risk.
 
 
 ## Quick Start
@@ -122,36 +123,29 @@ For production:
 
 Make sure you have the [Fly.io CLI](https://fly.io/docs/flyctl/) installed.
 
-Start by creating a `fly.toml` file for your app using this command:
+Start by doing an initial deployment of your app to get a URL for your app using this command:
 ```bash
-fly launch --no-deploy
+fly launch
 ```
+
+The url should look something like `https://your-app-name.fly.dev`.
 
 Create a new `.env.production` file based on the `.env.template` file.
 ```bash
 cp .env.template .env.production
 ```
 
-Import the environment variables as secrets into Fly.io:
+Configure `.env.production` following the instructions in the [Quick Start](#3-configure-environment) section.
+Set `APP_URL` to the URL of your app.
+
+Run this command to import the secrets into Fly.io and redeploy your app:
+
 ```bash
 cat .env.production | fly secrets import
 ```
 
-Then do an initial deploy of your app to get a URL:
-```bash
-fly deploy
-```
-
-When you app is deployed, retrieve your app's url from the output of the previous command. (it should look something like `https://your-app-name.fly.dev`)
-
-Set this url as the `APP_URL` environment variable in your `.env.production` file and run these commands again to update the secrets and redeploy your app:
-```bash
-cat .env.production > fly secrets import
-```
-
-Finally, set your app's url as an allowed redirect URI in your [SweatStack application settings](https://app.sweatstack.no/settings/api).
-
 When you make changes to your app, just run the `fly deploy` command again to redeploy your app.
+You can configure the deployment configuration of your app in the `fly.toml` file that was creating during the intitial deploy.
 
 ## License
 
