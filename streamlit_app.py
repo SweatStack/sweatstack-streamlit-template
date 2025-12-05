@@ -5,6 +5,12 @@ from sweatstack.streamlit import StreamlitAuth
 
 APP_URL = os.getenv("APP_URL", "http://localhost:8080")
 
+
+st.set_page_config(
+    page_title="SweatStack Streamlit template",
+    page_icon="🚀",
+)
+
 st.title("SweatStack Streamlit template 🚀")
 
 auth = StreamlitAuth.behind_proxy(redirect_uri=f"{APP_URL}/auth/callback")
