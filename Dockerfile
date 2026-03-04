@@ -20,7 +20,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv venv
 RUN uv sync --locked
 
-COPY streamlit_app.py proxy.py supervisord.conf .streamlit/config.toml ./
+COPY streamlit_app.py proxy.py supervisord.conf .streamlit/config.toml manifest.json pwa.toml ./
+COPY static/ static/
 
 EXPOSE 8080
 

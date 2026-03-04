@@ -1,0 +1,2 @@
+apple_status_bar_style = "default"   # "default" | "black" | "black-translucent"
+apple_touch_icon = "icon-180x180.png"  # filename in static/ dir, served under /_pwa/

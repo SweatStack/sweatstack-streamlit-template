@@ -3,11 +3,15 @@ import base64
 import hashlib
 import json
 import logging
+import mimetypes
 import os
+from pathlib import Path
 import secrets
 import time
 from typing import Any
 from urllib.parse import urlencode
+
+import tomllib
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -51,6 +55,37 @@ HOP_BY_HOP_HEADERS = frozenset({
     "content-encoding",
     "content-length",
 })
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+# PWA configuration
+_manifest_path = PROJECT_ROOT / "manifest.json"
+_pwa_config_path = PROJECT_ROOT / "pwa.toml"
+
+if _manifest_path.is_file():
+    MANIFEST = json.loads(_manifest_path.read_text())
+    logger.info("Loaded manifest.json for PWA support")
+else:
+    MANIFEST = None
+
+if MANIFEST and _pwa_config_path.is_file():
+    PWA_CONFIG = tomllib.loads(_pwa_config_path.read_text())
+else:
+    PWA_CONFIG = {}
+
+if MANIFEST:
+    _apple_status_bar = PWA_CONFIG.get("apple_status_bar_style", "default")
+    _apple_touch_icon = PWA_CONFIG.get("apple_touch_icon", "icon-180x180.png")
+    PWA_META_TAGS = (
+        '<link rel="manifest" href="/manifest.json">'
+        f'<meta name="theme-color" content="{MANIFEST.get("theme_color", "#ffffff")}">'
+        '<meta name="apple-mobile-web-app-capable" content="yes">'
+        f'<meta name="apple-mobile-web-app-status-bar-style" content="{_apple_status_bar}">'
+        f'<meta name="apple-mobile-web-app-title" content="{MANIFEST.get("name", "")}">'
+        '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+    )
+else:
+    PWA_META_TAGS = None
 
 TokenData = dict[str, Any]
 
@@ -274,6 +309,37 @@ async def logout():
     return response
 
 
+@app.get("/manifest.json")
+async def serve_manifest():
+    """Serve the web app manifest."""
+    if MANIFEST is None:
+        return Response(status_code=404)
+    return Response(
+        content=json.dumps(MANIFEST),
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/apple-touch-icon.png")
+async def serve_apple_touch_icon():
+    """Serve apple-touch-icon.png from the root URL, which iOS checks by convention."""
+    icon_name = PWA_CONFIG.get("apple_touch_icon", "icon-180x180.png")
+    icon_path = (PROJECT_ROOT / "static" / icon_name).resolve()
+    if not icon_path.is_relative_to(PROJECT_ROOT / "static") or not icon_path.is_file():
+        return Response(status_code=404)
+    return Response(content=icon_path.read_bytes(), media_type="image/png")
+
+
+@app.get("/_pwa/{file_path:path}")
+async def serve_static(file_path: str):
+    """Serve files from the static/ directory under /_pwa/ to avoid colliding with Streamlit's /static/."""
+    safe_path = (PROJECT_ROOT / "static" / file_path).resolve()
+    if not safe_path.is_relative_to(PROJECT_ROOT / "static") or not safe_path.is_file():
+        return Response(status_code=404)
+    content_type = mimetypes.guess_type(str(safe_path))[0] or "application/octet-stream"
+    return Response(content=safe_path.read_bytes(), media_type=content_type)
+
+
 @app.api_route(
     "/{full_path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
@@ -295,8 +361,19 @@ async def http_proxy(full_path: str, request: Request) -> Response:
             content=body,
         )
 
+    content = upstream_response.content
+    content_type = upstream_response.headers.get("content-type", "")
+
+    if PWA_META_TAGS and "text/html" in content_type:
+        html = content.decode("utf-8", errors="replace")
+        head_pos = html.find("<head>")
+        if head_pos != -1:
+            insert_pos = head_pos + len("<head>")
+            html = html[:insert_pos] + PWA_META_TAGS + html[insert_pos:]
+            content = html.encode("utf-8")
+
     response = Response(
-        content=upstream_response.content,
+        content=content,
         status_code=upstream_response.status_code,
         headers=_filter_response_headers(dict(upstream_response.headers)),
     )

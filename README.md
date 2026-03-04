@@ -38,8 +38,11 @@ Edit `.env` with your credentials:
 SWEATSTACK_CLIENT_ID=your_client_id
 SWEATSTACK_CLIENT_SECRET=your_client_secret
 SECRET_KEY=your_random_secret_key
-HTTPS_ONLY=false  # Set to true in production
+HTTPS_ONLY=false
+APP_URL=http://localhost:8080
 ```
+
+For production, create a separate `.env.production` with your deployed URL (e.g. `APP_URL=https://your-app.fly.dev`). See [Production Deployment](#production-deployment) for details.
 
 Generate a secure secret key:
 
@@ -110,6 +113,19 @@ Edit `streamlit_app.py` to build your application. The template provides:
 - `auth.logout_button()` - Logout button widget
 
 Read the documentation for the SweatStack Python library and its Streamlit integration [here](https://developer.sweatstack.no/learn/integrations/streamlit/).
+
+## PWA / Add to Homescreen
+
+The template supports installing your app to the homescreen on iOS and Android. Edit these files to customize:
+
+- **`manifest.json`** — App name, theme color, and icons shown on the homescreen and splash screen. See the [W3C spec](https://developer.mozilla.org/en-US/docs/Web/Manifest) for all options.
+- **`pwa.toml`** — Apple-specific settings (`apple_status_bar_style`, `apple_touch_icon`).
+- **`static/`** — Place your icon files here. Required sizes:
+  - `icon-192x192.png` — Android homescreen icon
+  - `icon-512x512.png` — Android splash screen
+  - `icon-180x180.png` — iOS homescreen icon
+
+Icons are served under `/_pwa/` to avoid colliding with Streamlit's own `/static/` path. If `manifest.json` is removed, all PWA features are disabled and the app works as before.
 
 ## Production Deployment
 
