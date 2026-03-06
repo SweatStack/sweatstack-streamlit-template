@@ -116,14 +116,13 @@ Read the documentation for the SweatStack Python library and its Streamlit integ
 
 ## PWA / Add to Homescreen
 
-The template supports installing your app to the homescreen on iOS and Android. Edit these files to customize:
+The template supports installing your app to the homescreen on iOS and Android. To customize for your app:
 
-- **`manifest.json`** — App name, theme color, and icons shown on the homescreen and splash screen. See the [W3C spec](https://developer.mozilla.org/en-US/docs/Web/Manifest) for all options.
-- **`pwa.toml`** — Apple-specific settings (`apple_status_bar_style`, `apple_touch_icon`).
-- **`static/`** — Place your icon files here. Required sizes:
-  - `icon-192x192.png` — Android homescreen icon
-  - `icon-512x512.png` — Android splash screen
-  - `icon-180x180.png` — iOS homescreen icon
+1. Edit **`manifest.json`** — Set `name`, `short_name` (max ~12 chars), `theme_color`, and `background_color`. See the [MDN Web App Manifest docs](https://developer.mozilla.org/en-US/docs/Web/Manifest) for all options.
+2. Replace the icons in **`static/`** with your own (keep the filenames):
+   - `icon-192x192.png` — Android homescreen icon
+   - `icon-512x512.png` — Android splash screen
+   - `icon-180x180.png` — iOS homescreen icon
 
 Icons are served under `/_pwa/` to avoid colliding with Streamlit's own `/static/` path. If `manifest.json` is removed, all PWA features are disabled and the app works as before.
 

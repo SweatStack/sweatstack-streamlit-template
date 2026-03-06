@@ -11,8 +11,6 @@ import time
 from typing import Any
 from urllib.parse import urlencode
 
-import tomllib
-
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -60,29 +58,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 # PWA configuration
 _manifest_path = PROJECT_ROOT / "manifest.json"
-_pwa_config_path = PROJECT_ROOT / "pwa.toml"
-
 if _manifest_path.is_file():
     MANIFEST = json.loads(_manifest_path.read_text())
     logger.info("Loaded manifest.json for PWA support")
 else:
     MANIFEST = None
 
-if MANIFEST and _pwa_config_path.is_file():
-    PWA_CONFIG = tomllib.loads(_pwa_config_path.read_text())
-else:
-    PWA_CONFIG = {}
-
 if MANIFEST:
-    _apple_status_bar = PWA_CONFIG.get("apple_status_bar_style", "default")
-    _apple_touch_icon = PWA_CONFIG.get("apple_touch_icon", "icon-180x180.png")
     PWA_META_TAGS = (
         '<link rel="manifest" href="/manifest.json">'
         f'<meta name="theme-color" content="{MANIFEST.get("theme_color", "#ffffff")}">'
         '<meta name="apple-mobile-web-app-capable" content="yes">'
-        f'<meta name="apple-mobile-web-app-status-bar-style" content="{_apple_status_bar}">'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="default">'
         f'<meta name="apple-mobile-web-app-title" content="{MANIFEST.get("name", "")}">'
-        '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+        '<link rel="apple-touch-icon" sizes="180x180" href="/_pwa/icon-180x180.png">'
     )
 else:
     PWA_META_TAGS = None
@@ -317,17 +306,8 @@ async def serve_manifest():
     return Response(
         content=json.dumps(MANIFEST),
         media_type="application/manifest+json",
+        headers={"cache-control": "public, max-age=86400"},
     )
-
-
-@app.get("/apple-touch-icon.png")
-async def serve_apple_touch_icon():
-    """Serve apple-touch-icon.png from the root URL, which iOS checks by convention."""
-    icon_name = PWA_CONFIG.get("apple_touch_icon", "icon-180x180.png")
-    icon_path = (PROJECT_ROOT / "static" / icon_name).resolve()
-    if not icon_path.is_relative_to(PROJECT_ROOT / "static") or not icon_path.is_file():
-        return Response(status_code=404)
-    return Response(content=icon_path.read_bytes(), media_type="image/png")
 
 
 @app.get("/_pwa/{file_path:path}")
@@ -337,7 +317,11 @@ async def serve_static(file_path: str):
     if not safe_path.is_relative_to(PROJECT_ROOT / "static") or not safe_path.is_file():
         return Response(status_code=404)
     content_type = mimetypes.guess_type(str(safe_path))[0] or "application/octet-stream"
-    return Response(content=safe_path.read_bytes(), media_type=content_type)
+    return Response(
+        content=safe_path.read_bytes(),
+        media_type=content_type,
+        headers={"cache-control": "public, max-age=604800"},
+    )
 
 
 @app.api_route(
