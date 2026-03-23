@@ -54,6 +54,17 @@ HOP_BY_HOP_HEADERS = frozenset({
     "content-length",
 })
 
+# Headers managed by the websockets library during the upgrade handshake.
+# Forwarding them from the client would cause duplicates or mismatches.
+WS_HANDSHAKE_HEADERS = frozenset({
+    "connection",
+    "upgrade",
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+    "sec-websocket-protocol",
+})
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 # PWA configuration
@@ -181,11 +192,11 @@ def _build_upstream_url(path: str, query_string: str = "", websocket: bool = Fal
 
 
 def _prepare_upstream_headers(
-    incoming_headers: dict[str, str] | None,
+    incoming_headers: dict[str, str],
     token: str | None,
 ) -> dict[str, str]:
     """Prepare headers for upstream request, injecting auth token if available."""
-    headers = dict(incoming_headers) if incoming_headers else {}
+    headers = dict(incoming_headers)
     headers.pop("host", None)
     headers.pop("accept-encoding", None)
     if token:
@@ -377,7 +388,9 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
     upstream_url = _build_upstream_url(full_path, query_string, websocket=True)
 
     token, _ = await _get_valid_token(websocket.cookies)
-    headers = _prepare_upstream_headers(None, token)
+    headers = _prepare_upstream_headers(dict(websocket.headers), token)
+    for hdr in WS_HANDSHAKE_HEADERS:
+        headers.pop(hdr, None)
 
     try:
         async with ws_connect(upstream_url, additional_headers=headers) as upstream:
