@@ -18,13 +18,15 @@ Note down your **Client ID** and **Client Secret**.
 
 ### 2. Configure Environment
 
-```bash
-cp .env.template .env
+Copy the environment template and edit it with your credentials:
+
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `cp .env.template .env` | `Copy-Item .env.template .env` |
+
+Edit `.env`:
+
 ```
-
-Edit `.env` with your credentials:
-
-```bash
 SWEATSTACK_CLIENT_ID=your_client_id
 SWEATSTACK_CLIENT_SECRET=your_client_secret
 SECRET_KEY=your_random_secret_key
@@ -34,28 +36,23 @@ APP_URL=http://localhost:8080
 
 Generate a secure secret key:
 
-```bash
-openssl rand -base64 32
-```
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `openssl rand -base64 32` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
 
 ### 3. Install Dependencies and Run
 
 ```bash
-# Install dependencies
 uv sync
-
-# Build the Docker image
-make build
-
-# Run the application
-make serve
+docker build -t {{ project_slug }} .
+docker run --rm --env-file .env --volume .:/app -p 8080:8080 {{ project_slug }}
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in your browser.
 
 ## Development
 
-The `make serve` command mounts the current directory, so changes to `streamlit_app.py` will be reflected after a browser refresh.
+The `docker run` command above mounts the current directory, so changes to `streamlit_app.py` will be reflected after a browser refresh.
 
 ### Environment Variables
 
@@ -109,15 +106,15 @@ fly launch
 
 Create a production environment file:
 
-```bash
-cp .env.template .env.production
-```
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `cp .env.template .env.production` | `Copy-Item .env.template .env.production` |
 
 Configure it with your production `APP_URL` (e.g. `https://your-app.fly.dev`), then import secrets:
 
-```bash
-cat .env.production | fly secrets import
-```
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `cat .env.production \| fly secrets import` | `Get-Content .env.production \| fly secrets import` |
 
 Redeploy with `fly deploy` when you make changes.
 

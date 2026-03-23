@@ -27,9 +27,13 @@ Then install dependencies and set up your environment:
 
 ```bash
 uv sync
-cp .env.template .env
-# Edit .env with your SweatStack credentials (see below)
 ```
+
+Copy the environment template and edit it with your SweatStack credentials (see below):
+
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `cp .env.template .env` | `Copy-Item .env.template .env` |
 
 ### SweatStack Credentials
 
@@ -37,21 +41,27 @@ Create a new application at [app.sweatstack.no/applications/new](https://app.swe
 
 Set the redirect URI to `http://localhost:8080/auth/callback` for local development.
 
-Note your **Client ID** and **Client Secret** and add them to `.env`:
+Note your **Client ID** and **Client Secret** and edit `.env`:
 
-```bash
+```
 SWEATSTACK_CLIENT_ID=your_client_id
 SWEATSTACK_CLIENT_SECRET=your_client_secret
-SECRET_KEY=$(openssl rand -base64 32)
+SECRET_KEY=your_random_secret_key
 HTTPS_ONLY=false
 APP_URL=http://localhost:8080
 ```
 
+Generate a secure secret key:
+
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `openssl rand -base64 32` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+
 ### Build and Run
 
 ```bash
-make build
-make serve
+docker build -t my-app .
+docker run --rm --env-file .env --volume .:/app -p 8080:8080 my-app
 ```
 
 Open [http://localhost:8080](http://localhost:8080).
@@ -162,11 +172,15 @@ fly launch
 
 Create a production environment:
 
-```bash
-cp .env.template .env.production
-# Set APP_URL=https://your-app.fly.dev and HTTPS_ONLY=true
-cat .env.production | fly secrets import
-```
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `cp .env.template .env.production` | `Copy-Item .env.template .env.production` |
+
+Set `APP_URL=https://your-app.fly.dev` and `HTTPS_ONLY=true`, then import secrets:
+
+| macOS / Linux | Windows (PowerShell) |
+|---|---|
+| `cat .env.production \| fly secrets import` | `Get-Content .env.production \| fly secrets import` |
 
 Redeploy with `fly deploy` when you make changes.
 
