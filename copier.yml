@@ -1,0 +1,41 @@
+_min_copier_version: "9.0.0"
+
+_exclude:
+  - copier.yml
+  - PLAN.md
+  - "*.patch"
+  - test_proxy_e2e.py
+  - META_TAGS.md
+  - .DS_Store
+  - .claude/
+  - uv.lock
+
+project_name:
+  type: str
+  help: Human-readable name for your app (e.g. "My Cycling Dashboard")
+  default: "My SweatStack App"
+
+project_slug:
+  type: str
+  help: URL and package-safe name (lowercase, hyphens)
+  default: "{{ project_name | lower | replace(' ', '-') | replace('_', '-') }}"
+
+description:
+  type: str
+  help: Short description of your app
+  default: "A Streamlit app powered by SweatStack"
+
+page_icon:
+  type: str
+  help: Emoji icon for the Streamlit page tab
+  default: "\U0001F680"
+
+theme_color:
+  type: str
+  help: "PWA theme color (hex, e.g. #ff6600)"
+  default: "#ffffff"
+
+background_color:
+  type: str
+  help: "PWA background color (hex, e.g. #ffffff)"
+  default: "#ffffff"

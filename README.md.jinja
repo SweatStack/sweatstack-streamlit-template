@@ -1,0 +1,136 @@
+# {{ project_name }}
+
+{{ description }}
+
+Built with [Streamlit](https://streamlit.io/) and [SweatStack](https://sweatstack.no/).
+
+## Setup
+
+### 1. Create a SweatStack Application
+
+Create a new application at [app.sweatstack.no/applications/new](https://app.sweatstack.no/applications/new).
+
+Set the redirect URI to your callback URL:
+- Local development: `http://localhost:8080/auth/callback`
+- Production: `https://yourdomain.com/auth/callback`
+
+Note down your **Client ID** and **Client Secret**.
+
+### 2. Configure Environment
+
+```bash
+cp .env.template .env
+```
+
+Edit `.env` with your credentials:
+
+```bash
+SWEATSTACK_CLIENT_ID=your_client_id
+SWEATSTACK_CLIENT_SECRET=your_client_secret
+SECRET_KEY=your_random_secret_key
+HTTPS_ONLY=false
+APP_URL=http://localhost:8080
+```
+
+Generate a secure secret key:
+
+```bash
+openssl rand -base64 32
+```
+
+### 3. Install Dependencies and Run
+
+```bash
+# Install dependencies
+uv sync
+
+# Build the Docker image
+make build
+
+# Run the application
+make serve
+```
+
+Open [http://localhost:8080](http://localhost:8080) in your browser.
+
+## Development
+
+The `make serve` command mounts the current directory, so changes to `streamlit_app.py` will be reflected after a browser refresh.
+
+### Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `SWEATSTACK_CLIENT_ID` | OAuth client ID from SweatStack | Yes |
+| `SWEATSTACK_CLIENT_SECRET` | OAuth client secret from SweatStack | Yes |
+| `SECRET_KEY` | Secret key for encrypting cookies (min 32 chars) | Yes |
+| `APP_URL` | Public URL of the application | No (default: `http://localhost:8080`) |
+| `HTTPS_ONLY` | Set cookie secure flag (`true` for production) | No (default: `true`) |
+| `UPSTREAM_URL` | Internal Streamlit URL | No (default: `http://localhost:8501`) |
+
+## Customizing Your App
+
+Edit `streamlit_app.py` to build your application. The template provides:
+
+- `auth.is_authenticated()` — Check if user is logged in
+- `auth.client` — Authenticated SweatStack API client
+- `auth.select_user()` — User selector widget for the sidebar
+- `auth.logout_button()` — Logout button widget
+
+Read the documentation for the SweatStack Python library and its Streamlit integration [here](https://developer.sweatstack.no/learn/integrations/streamlit/).
+
+## PWA / Add to Homescreen
+
+The template supports installing your app to the homescreen on iOS and Android. To customize:
+
+1. Edit **`manifest.json`** — Set `name`, `short_name`, `theme_color`, and `background_color`.
+2. Replace the icons in **`static/`** with your own (keep the filenames):
+   - `icon-192x192.png` — Android homescreen icon
+   - `icon-512x512.png` — Android splash screen
+   - `icon-180x180.png` — iOS homescreen icon
+
+If `manifest.json` is removed, all PWA features are disabled.
+
+## Production Deployment
+
+For production:
+
+1. Use a strong, unique `SECRET_KEY`
+2. Deploy behind HTTPS (required for secure cookies)
+3. Update the redirect URI in your SweatStack application settings
+
+### Deploying to Fly.io
+
+Install the [Fly.io CLI](https://fly.io/docs/flyctl/), then:
+
+```bash
+fly launch
+```
+
+Create a production environment file:
+
+```bash
+cp .env.template .env.production
+```
+
+Configure it with your production `APP_URL` (e.g. `https://your-app.fly.dev`), then import secrets:
+
+```bash
+cat .env.production | fly secrets import
+```
+
+Redeploy with `fly deploy` when you make changes.
+
+## Updating the Template
+
+This project was generated with [Copier](https://copier.readthedocs.io/). To pull in template updates:
+
+```bash
+copier update
+```
+
+Copier performs a three-way merge, so your customisations are preserved. Only lines changed by both you and the template will produce conflicts.
+
+## License
+
+See [LICENSE](LICENSE).

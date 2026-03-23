@@ -1,0 +1,7 @@
+.PHONY: build
+
+build:
+	docker build -t {{ project_slug }} .
+
+serve:
+	docker run --rm --env-file .env --volume .:/app -p 8080:8080 {{ project_slug }}
