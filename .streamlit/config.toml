@@ -1,3 +1,10 @@
+[server]
+# Streamlit sits behind the FastAPI proxy and is never exposed directly.
+# The proxy handles CORS and auth — Streamlit's own checks must be disabled
+# or the Origin mismatch (proxy port vs Streamlit port) rejects WebSockets.
+enableCORS = false
+enableXsrfProtection = false
+
 [client]
 showErrorDetails = "none"
 
