@@ -54,17 +54,6 @@ HOP_BY_HOP_HEADERS = frozenset({
     "content-length",
 })
 
-# Headers managed by the websockets library during the upgrade handshake.
-# Forwarding them from the client would cause duplicates or mismatches.
-WS_HANDSHAKE_HEADERS = frozenset({
-    "connection",
-    "upgrade",
-    "sec-websocket-key",
-    "sec-websocket-version",
-    "sec-websocket-extensions",
-    "sec-websocket-protocol",
-})
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 # PWA configuration
@@ -207,6 +196,40 @@ def _prepare_upstream_headers(
 def _filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
     """Remove hop-by-hop headers that shouldn't be forwarded."""
     return {k: v for k, v in headers.items() if k.lower() not in HOP_BY_HOP_HEADERS}
+
+
+def _prepare_ws_connection_args(
+    client_headers: dict[str, str],
+    token: str | None,
+) -> tuple[dict[str, str], list[str]]:
+    """Prepare headers and subprotocols for an upstream WebSocket connection.
+
+    Extracts subprotocols from the client's Sec-WebSocket-Protocol header for
+    separate negotiation via ``ws_connect(subprotocols=...)``, then strips all
+    WebSocket handshake headers that the ``websockets`` library manages itself.
+
+    Returns ``(headers, subprotocols)``.
+    """
+    _ws_handshake_headers = frozenset({
+        "connection",
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+    })
+
+    headers = _prepare_upstream_headers(client_headers, token)
+
+    subprotocols = [
+        s.strip()
+        for s in headers.pop("sec-websocket-protocol", "").split(",")
+        if s.strip()
+    ]
+
+    for hdr in _ws_handshake_headers:
+        headers.pop(hdr, None)
+
+    return headers, subprotocols
 
 
 # FastAPI app
@@ -382,18 +405,21 @@ async def http_proxy(full_path: str, request: Request) -> Response:
 @app.websocket("/{full_path:path}")
 async def websocket_proxy(websocket: WebSocket, full_path: str):
     """Proxy WebSocket connections to upstream with auth token."""
-    await websocket.accept()
-
     query_string = websocket.scope.get("query_string", b"").decode()
     upstream_url = _build_upstream_url(full_path, query_string, websocket=True)
 
     token, _ = await _get_valid_token(websocket.cookies)
-    headers = _prepare_upstream_headers(dict(websocket.headers), token)
-    for hdr in WS_HANDSHAKE_HEADERS:
-        headers.pop(hdr, None)
+    headers, subprotocols = _prepare_ws_connection_args(dict(websocket.headers), token)
 
     try:
-        async with ws_connect(upstream_url, additional_headers=headers) as upstream:
+        async with ws_connect(
+            upstream_url,
+            additional_headers=headers,
+            subprotocols=subprotocols or None,
+        ) as upstream:
+            # Accept only after upstream connects — we need the negotiated
+            # subprotocol, and there's no point accepting if upstream is down.
+            await websocket.accept(subprotocol=upstream.subprotocol)
 
             async def client_to_upstream():
                 try:
@@ -423,4 +449,4 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
 
             await asyncio.gather(client_to_upstream(), upstream_to_client())
     except Exception:
-        logger.exception("WebSocket proxy error")
+        logger.exception("WebSocket proxy error for %s", full_path)
