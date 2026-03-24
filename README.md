@@ -17,7 +17,7 @@ uv tool install copier
 Generate your project:
 
 ```bash
-copier copy gh:sweatstack/streamlit-template my-app
+copier copy gh:SweatStack/sweatstack-streamlit-template my-app
 cd my-app
 ```
 
@@ -92,7 +92,7 @@ git status  # should be clean
 ### 2. Re-generate the project with Copier on top of your existing directory
 
 ```bash
-copier copy --overwrite gh:sweatstack/streamlit-template .
+copier copy --overwrite gh:SweatStack/sweatstack-streamlit-template .
 ```
 
 Copier will ask the template questions. Answer them to match your current project (name, description, etc.). It will overwrite infrastructure files with the latest versions and leave a `.copier-answers.yml` file that tracks your template version.
