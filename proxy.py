@@ -9,7 +9,7 @@ from pathlib import Path
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -32,6 +32,7 @@ SWEATSTACK_CLIENT_SECRET = os.getenv("SWEATSTACK_CLIENT_SECRET")
 
 TOKEN_COOKIE_NAME = "sweatstack_tokens"
 RETURN_TO_COOKIE_NAME = "return_to"
+AUTH_ATTEMPTED_COOKIE_NAME = "auth_attempted"
 TOKEN_REFRESH_THRESHOLD_SECONDS = 20
 COOKIE_MAX_AGE_SECONDS = 86400 * 365  # 365 days
 DEFAULT_TOKEN_EXPIRY_SECONDS = 15 * 60
@@ -41,6 +42,7 @@ if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY environment variable is required")
 
 HTTPS_ONLY = os.getenv("HTTPS_ONLY", "true").lower() == "true"
+AUTO_LOGIN = os.getenv("AUTO_LOGIN", "false").lower() == "true"
 
 HOP_BY_HOP_HEADERS = frozenset({
     "connection",
@@ -315,18 +317,20 @@ async def login(request: Request):
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
     """Handle OAuth callback and store tokens in encrypted cookie."""
+    return_to = _validate_return_url(request.cookies.get(RETURN_TO_COOKIE_NAME, "/"))
+
     # Verify state
     state_from_cookie = request.cookies.get(STATE_COOKIE_NAME)
     state_from_params = request.query_params.get("state")
 
     if not state_from_cookie or state_from_cookie != state_from_params:
         logger.warning("State mismatch: cookie=%s, param=%s", state_from_cookie, state_from_params)
-        return RedirectResponse(url="/login")
+        return RedirectResponse(url=return_to)
 
     code = request.query_params.get("code")
     if not code:
         logger.warning("No authorization code received")
-        return RedirectResponse(url="/login")
+        return RedirectResponse(url=return_to)
 
     # Exchange code for tokens
     redirect_uri = f"{APP_URL}/auth/callback"
@@ -344,18 +348,17 @@ async def auth_callback(request: Request):
 
     if token_response.status_code != 200:
         logger.warning("Token exchange failed: %s", token_response.text)
-        return RedirectResponse(url="/login")
+        return RedirectResponse(url=return_to)
 
     token_data = token_response.json()
     access_token = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token")
     expires_in = token_data.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
 
-    return_to = _validate_return_url(request.cookies.get(RETURN_TO_COOKIE_NAME, "/"))
-
     response = RedirectResponse(url=return_to)
     response.delete_cookie(STATE_COOKIE_NAME)
     response.delete_cookie(RETURN_TO_COOKIE_NAME)
+    response.delete_cookie(AUTH_ATTEMPTED_COOKIE_NAME)
 
     if access_token:
         expires_at = time.time() + expires_in
@@ -408,9 +411,31 @@ async def serve_static(file_path: str):
 async def http_proxy(full_path: str, request: Request) -> Response:
     """Proxy HTTP requests to upstream, injecting auth token if available."""
     query_string = request.scope.get("query_string", b"").decode()
-    upstream_url = _build_upstream_url(full_path, query_string)
 
     token, new_cookie = await _get_valid_token(request.cookies)
+
+    # Auto-redirect unauthenticated browser navigations to login.
+    if (
+        AUTO_LOGIN
+        and not token
+        and "text/html" in request.headers.get("accept", "")
+        and AUTH_ATTEMPTED_COOKIE_NAME not in request.cookies
+    ):
+        next_url = f"/{full_path}"
+        if query_string:
+            next_url = f"{next_url}?{query_string}"
+        redirect = RedirectResponse(url=f"/login?next={quote(next_url, safe='')}")
+        redirect.set_cookie(
+            AUTH_ATTEMPTED_COOKIE_NAME,
+            "1",
+            httponly=True,
+            secure=HTTPS_ONLY,
+            samesite="lax",
+            max_age=300,
+        )
+        return redirect
+
+    upstream_url = _build_upstream_url(full_path, query_string)
     headers = _prepare_upstream_headers(dict(request.headers), token)
     body = await request.body()
 
