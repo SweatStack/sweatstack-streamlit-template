@@ -3,6 +3,7 @@ _min_copier_version: "9.0.0"
 _exclude:
   - copier.yml
   - PLAN.md
+  - plans/
   - "*.patch"
   - test_proxy_e2e.py
   - META_TAGS.md
