@@ -31,6 +31,7 @@ SWEATSTACK_CLIENT_ID = os.getenv("SWEATSTACK_CLIENT_ID")
 SWEATSTACK_CLIENT_SECRET = os.getenv("SWEATSTACK_CLIENT_SECRET")
 
 TOKEN_COOKIE_NAME = "sweatstack_tokens"
+RETURN_TO_COOKIE_NAME = "return_to"
 TOKEN_REFRESH_THRESHOLD_SECONDS = 20
 COOKIE_MAX_AGE_SECONDS = 86400 * 365  # 365 days
 DEFAULT_TOKEN_EXPIRY_SECONDS = 15 * 60
@@ -65,7 +66,7 @@ else:
     MANIFEST = None
 
 if MANIFEST:
-    PWA_META_TAGS = (
+    _PWA_META_TAGS = (
         '<link rel="manifest" href="/manifest.json">'
         f'<meta name="theme-color" content="{MANIFEST.get("theme_color", "#ffffff")}">'
         '<meta name="apple-mobile-web-app-capable" content="yes">'
@@ -74,9 +75,34 @@ if MANIFEST:
         '<link rel="apple-touch-icon" sizes="180x180" href="/_pwa/icon-180x180.png">'
     )
 else:
-    PWA_META_TAGS = None
+    _PWA_META_TAGS = None
+
+# Script that rewrites /login links at click time to include ?next= with the
+# current page URL. Uses event delegation to handle Streamlit's dynamic DOM.
+_LOGIN_NEXT_SCRIPT = (
+    "<script>"
+    "document.addEventListener('click',function(e){"
+    'var a=e.target.closest(\'a[href="/login"]\');'
+    "if(a)a.href='/login?next='+encodeURIComponent(location.pathname+location.search)"
+    "});"
+    "</script>"
+)
+
+# Combined HTML injected into <head> of every HTML response.
+_HEAD_INJECT = _LOGIN_NEXT_SCRIPT + (_PWA_META_TAGS or "")
 
 TokenData = dict[str, Any]
+
+
+def _validate_return_url(url: str) -> str:
+    """Validate return URL to prevent open redirects.
+
+    Only allows relative paths. Rejects empty strings, protocol-relative
+    URLs (//...), backslash tricks (\\...), and absolute URLs.
+    """
+    if not url or not url.startswith("/") or url.startswith("//") or "\\" in url:
+        return "/"
+    return url
 
 
 def _get_fernet() -> Fernet:
@@ -268,6 +294,20 @@ async def login(request: Request):
 
     response = RedirectResponse(url=auth_url)
     _set_state_cookie(response, state)
+
+    # Only set return_to when explicitly provided — error retries hit /login
+    # without ?next=, and must not overwrite the cookie.
+    next_url = request.query_params.get("next")
+    if next_url is not None:
+        response.set_cookie(
+            RETURN_TO_COOKIE_NAME,
+            _validate_return_url(next_url),
+            httponly=True,
+            secure=HTTPS_ONLY,
+            samesite="lax",
+            max_age=600,
+        )
+
     logger.info("Login initiated, redirect_uri=%s", redirect_uri)
     return response
 
@@ -311,8 +351,11 @@ async def auth_callback(request: Request):
     refresh_token = token_data.get("refresh_token")
     expires_in = token_data.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
 
-    response = RedirectResponse(url="/")
+    return_to = _validate_return_url(request.cookies.get(RETURN_TO_COOKIE_NAME, "/"))
+
+    response = RedirectResponse(url=return_to)
     response.delete_cookie(STATE_COOKIE_NAME)
+    response.delete_cookie(RETURN_TO_COOKIE_NAME)
 
     if access_token:
         expires_at = time.time() + expires_in
@@ -382,12 +425,12 @@ async def http_proxy(full_path: str, request: Request) -> Response:
     content = upstream_response.content
     content_type = upstream_response.headers.get("content-type", "")
 
-    if PWA_META_TAGS and "text/html" in content_type:
+    if "text/html" in content_type:
         html = content.decode("utf-8", errors="replace")
         head_pos = html.find("<head>")
         if head_pos != -1:
             insert_pos = head_pos + len("<head>")
-            html = html[:insert_pos] + PWA_META_TAGS + html[insert_pos:]
+            html = html[:insert_pos] + _HEAD_INJECT + html[insert_pos:]
             content = html.encode("utf-8")
 
     response = Response(
