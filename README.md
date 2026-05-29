@@ -158,7 +158,7 @@ Edit `streamlit_app.py` to build your application. The template provides:
 - `auth.select_user()` — User selector widget for the sidebar
 - `auth.logout_button()` — Logout button widget
 
-Read the SweatStack Streamlit documentation [here](https://developer.sweatstack.no/learn/integrations/streamlit/).
+Read the SweatStack Streamlit documentation [here](https://docs.sweatstack.no/learn/integrations/streamlit/).
 
 ## Production Deployment
 

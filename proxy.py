@@ -278,6 +278,26 @@ def _set_state_cookie(response: Response, state: str) -> None:
     )
 
 
+def _set_auth_attempted_cookie(response: Response) -> None:
+    """Trip the auto-login circuit breaker.
+
+    Set only after a *failed* OAuth round-trip (a callback that came back
+    without usable tokens), never at flow initiation. This is what lets the
+    proxy distinguish an automatic redirect loop — which always returns through
+    /auth/callback with an error — from a user who simply abandoned the flow and
+    came back to retry, who never hits the callback at all and should be
+    auto-redirected again.
+    """
+    response.set_cookie(
+        AUTH_ATTEMPTED_COOKIE_NAME,
+        "1",
+        httponly=True,
+        secure=HTTPS_ONLY,
+        samesite="lax",
+        max_age=300,
+    )
+
+
 @app.get("/login")
 async def login(request: Request):
     """Initiate OAuth2 login with SweatStack."""
@@ -325,12 +345,16 @@ async def auth_callback(request: Request):
 
     if not state_from_cookie or state_from_cookie != state_from_params:
         logger.warning("State mismatch: cookie=%s, param=%s", state_from_cookie, state_from_params)
-        return RedirectResponse(url=return_to)
+        response = RedirectResponse(url=return_to)
+        _set_auth_attempted_cookie(response)
+        return response
 
     code = request.query_params.get("code")
     if not code:
         logger.warning("No authorization code received")
-        return RedirectResponse(url=return_to)
+        response = RedirectResponse(url=return_to)
+        _set_auth_attempted_cookie(response)
+        return response
 
     # Exchange code for tokens
     redirect_uri = f"{APP_URL}/auth/callback"
@@ -348,7 +372,9 @@ async def auth_callback(request: Request):
 
     if token_response.status_code != 200:
         logger.warning("Token exchange failed: %s", token_response.text)
-        return RedirectResponse(url=return_to)
+        response = RedirectResponse(url=return_to)
+        _set_auth_attempted_cookie(response)
+        return response
 
     token_data = token_response.json()
     access_token = token_data.get("access_token")
@@ -424,16 +450,12 @@ async def http_proxy(full_path: str, request: Request) -> Response:
         next_url = f"/{full_path}"
         if query_string:
             next_url = f"{next_url}?{query_string}"
-        redirect = RedirectResponse(url=f"/login?next={quote(next_url, safe='')}")
-        redirect.set_cookie(
-            AUTH_ATTEMPTED_COOKIE_NAME,
-            "1",
-            httponly=True,
-            secure=HTTPS_ONLY,
-            samesite="lax",
-            max_age=300,
-        )
-        return redirect
+        # The circuit breaker (auth_attempted) is NOT tripped here. It is set
+        # only when a failed OAuth attempt returns through /auth/callback, so
+        # that a user who abandons the flow without completing it is still
+        # auto-redirected when they retry, while an automatic redirect loop
+        # (which always passes back through the callback) is still broken.
+        return RedirectResponse(url=f"/login?next={quote(next_url, safe='')}")
 
     upstream_url = _build_upstream_url(full_path, query_string)
     headers = _prepare_upstream_headers(dict(request.headers), token)
