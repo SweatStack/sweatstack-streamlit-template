@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import os
+from collections.abc import Coroutine
 from pathlib import Path
 import secrets
 import time
@@ -15,7 +16,7 @@ import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse, Response
-from websockets.asyncio.client import connect as ws_connect
+from websockets.asyncio.client import ClientConnection, connect as ws_connect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 logger = logging.getLogger(__name__)
@@ -492,6 +493,67 @@ async def http_proxy(full_path: str, request: Request) -> Response:
     return response
 
 
+async def _run_until_first_complete(*coros: Coroutine[Any, Any, None]) -> None:
+    """Run coroutines concurrently until the first finishes, then cancel the rest.
+
+    Unlike ``asyncio.gather`` — which waits for *every* coroutine, even after a
+    sibling has already returned or raised — this tears the survivors down as
+    soon as one completes. For a bidirectional relay that distinction is the
+    whole game: once either direction ends, the connection is over, and a
+    direction still blocked on a read would otherwise stay parked forever,
+    keeping its captured connection objects alive (a slow resource leak).
+
+    The completed coroutine's result is retrieved so any *unexpected* exception
+    propagates to the caller; expected shutdowns return ``None`` quietly. The
+    survivors are always cancelled and awaited, including when the caller itself
+    is cancelled.
+    """
+    tasks = [asyncio.create_task(coro) for coro in coros]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()  # re-raise unexpected errors; clean shutdowns return None
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _pump_client_to_upstream(websocket: WebSocket, upstream: ClientConnection) -> None:
+    """Forward messages from the browser to the upstream Streamlit server."""
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if "text" in message:
+                await upstream.send(message["text"])
+            elif "bytes" in message:
+                await upstream.send(message["bytes"])
+    except (WebSocketDisconnect, ConnectionClosedOK, ConnectionClosedError):
+        # Browser hung up, or upstream closed while we were forwarding to it —
+        # both are ordinary end-of-connection, not errors.
+        pass
+
+
+async def _pump_upstream_to_client(websocket: WebSocket, upstream: ClientConnection) -> None:
+    """Forward messages from the upstream Streamlit server to the browser."""
+    try:
+        while True:
+            data = await upstream.recv()
+            if isinstance(data, str):
+                await websocket.send_text(data)
+            else:
+                await websocket.send_bytes(data)
+    except (ConnectionClosedOK, ConnectionClosedError, WebSocketDisconnect, RuntimeError):
+        # Upstream closed, or the browser vanished before we finished sending.
+        # Starlette surfaces a send-after-disconnect as a bare RuntimeError
+        # ("Unexpected ASGI message 'websocket.send', after sending
+        # 'websocket.close'"); within this send-only loop that only ever means
+        # the peer is already gone, so it is an ordinary shutdown too.
+        pass
+
+
 @app.websocket("/{full_path:path}")
 async def websocket_proxy(websocket: WebSocket, full_path: str):
     """Proxy WebSocket connections to upstream with auth token."""
@@ -511,32 +573,12 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
             # subprotocol, and there's no point accepting if upstream is down.
             await websocket.accept(subprotocol=upstream.subprotocol)
 
-            async def client_to_upstream():
-                try:
-                    while True:
-                        message = await websocket.receive()
-                        msg_type = message["type"]
-                        if msg_type == "websocket.receive":
-                            if "text" in message:
-                                await upstream.send(message["text"])
-                            elif "bytes" in message:
-                                await upstream.send(message["bytes"])
-                        elif msg_type == "websocket.disconnect":
-                            break
-                except WebSocketDisconnect:
-                    pass
-
-            async def upstream_to_client():
-                try:
-                    while True:
-                        data = await upstream.recv()
-                        if isinstance(data, str):
-                            await websocket.send_text(data)
-                        else:
-                            await websocket.send_bytes(data)
-                except (ConnectionClosedOK, ConnectionClosedError):
-                    pass
-
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+            # The two directions are independent; the moment either one ends,
+            # the connection is done and the other is cancelled — so a direction
+            # blocked on a read can never park and leak the connection.
+            await _run_until_first_complete(
+                _pump_client_to_upstream(websocket, upstream),
+                _pump_upstream_to_client(websocket, upstream),
+            )
     except Exception:
         logger.exception("WebSocket proxy error for %s", full_path)
