@@ -12,6 +12,7 @@ _exclude:
   - plans/
   - "*.patch"
   - test_proxy_e2e.py
+  - test_token_renewal_e2e.py
   - META_TAGS.md
   - .DS_Store
   - .claude/
