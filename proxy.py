@@ -68,8 +68,13 @@ if not SECRET_KEY:
 HTTPS_ONLY = _env_flag("HTTPS_ONLY", True)
 AUTO_LOGIN = _env_flag("AUTO_LOGIN", False)
 ALLOW_SIGNUP = _env_flag("ALLOW_SIGNUP", True)
-FORWARD_REFRESH_TOKEN = _env_flag("FORWARD_REFRESH_TOKEN", True)
 PWA_INSTALL_BANNER = _env_flag("PWA_INSTALL_BANNER", True)
+
+if os.getenv("FORWARD_REFRESH_TOKEN") is not None:
+    logger.warning(
+        "FORWARD_REFRESH_TOKEN is no longer supported and is ignored: the refresh token is "
+        "always forwarded, because the app needs it to renew the access token during long sessions."
+    )
 
 # Headers the proxy sets on every request to Streamlit. Any client-supplied
 # header with this prefix is dropped, so the app can trust these values.
@@ -350,7 +355,7 @@ def _prepare_upstream_headers(
     headers.pop("accept-encoding", None)
     if tokens.access_token:
         headers[TOKEN_HEADER] = tokens.access_token
-    if FORWARD_REFRESH_TOKEN and tokens.refresh_token:
+    if tokens.refresh_token:
         headers[REFRESH_TOKEN_HEADER] = tokens.refresh_token
     return headers
 
@@ -747,10 +752,10 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
     query_string = websocket.scope.get("query_string", b"").decode()
     upstream_url = _build_upstream_url(full_path, query_string, websocket=True)
 
-    # A WebSocket handshake can't set cookies, so if this refreshes the tokens
-    # the new ones are only used for this connection and the cookie keeps the
-    # old ones. In practice the page load (plain HTTP) that precedes the
-    # WebSocket has already refreshed and stored them.
+    # If this refreshes the tokens, the new ones are used for this connection
+    # only; the cookie is not updated, so the next request refreshes again.
+    # That costs one extra token request and nothing else: SweatStack doesn't
+    # rotate refresh tokens, and the session renews its own access token.
     tokens = await _get_valid_tokens(websocket.cookies)
     headers, subprotocols = _prepare_ws_connection_args(dict(websocket.headers), tokens)
 

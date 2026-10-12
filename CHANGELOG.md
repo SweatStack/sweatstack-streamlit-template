@@ -18,6 +18,26 @@ Types of changes:
 Releases are not tagged. `copier update` always moves a project to the latest commit on `main`, and each release below is identified by its version and date. To update a project, follow [UPGRADING.md](UPGRADING.md) together with the **Upgrade notes** of each release you cross.
 
 
+## [0.2.0] - Unreleased
+
+Requires `sweatstack` `<SDK_VERSION>` or later, which fixes two problems in the library's Streamlit and FastAPI integrations. Every app built from this template should upgrade, whichever template version it started from.
+
+### Security
+- **Requires `sweatstack>=<SDK_VERSION>`.** Earlier versions of the library could give one user's session another user's tokens when several users share a server process, as they do in every Streamlit app. See the `sweatstack` changelog for details.
+
+### Fixed
+- **Apps no longer fail after being left open.** Streamlit receives the user's tokens only when the page connects, and the access token expires after about 15 minutes, so the first interaction after a long idle period failed (for example with `TokenRefreshError: Access token expired but no refresh token available`). `StreamlitAuth.behind_proxy()` now uses the forwarded refresh token to renew the access token within the session, without reloading the page.
+
+### Removed
+- **`FORWARD_REFRESH_TOKEN`.** The refresh token is now always passed to Streamlit, because the library needs it to renew the session's access token; turning it off would bring back the failure above. If the variable is still set, the proxy ignores it and logs a warning.
+
+### Upgrade notes
+- **Upgrade `sweatstack` in every deployed app**: after `copier update`, run `uv lock --upgrade-package sweatstack`, check that `uv.lock` now has `<SDK_VERSION>` or later, and redeploy. `copier update` alone doesn't change the locked version.
+- **Remove `FORWARD_REFRESH_TOKEN`** from `.env`, `.env.production` and your hosting secrets (e.g. `fly secrets unset FORWARD_REFRESH_TOKEN`).
+- **Remove workarounds for expiring tokens**, such as forced page reloads, or `auth` / `auth.client` kept in `st.cache_resource` or module-level variables. Call `StreamlitAuth.behind_proxy()` at the top of every run instead.
+- **If you store the refresh token** for background jobs, re-read "Using the refresh token yourself" in the README; the advice is shorter now that SweatStack's refresh behaviour is documented.
+
+
 ## [0.1.0] - 2026-10-12
 
 First versioned release. Projects generated before this have no version recorded and should treat everything below as new; see [UPGRADING.md](UPGRADING.md).
