@@ -17,6 +17,7 @@ _exclude:
   - .claude/
   - uv.lock
   - CHANGELOG.md
+  - UPGRADING.md
 
 project_name:
   type: str

@@ -79,48 +79,11 @@ Copier performs a three-way merge (old template, new template, your files), so y
 > [!TIP]
 > `copier update` pulls in the latest version of the template from `main`. Run it periodically to stay current.
 
-Each release is described in the [changelog](CHANGELOG.md). Its *Updating* section has step-by-step upgrade instructions, written so you can also hand them to a coding agent.
+Before updating, read [UPGRADING.md](UPGRADING.md): step-by-step instructions, written so you can also hand them to a coding agent. What changed in each release is in the [changelog](CHANGELOG.md).
 
 ## Migrating from the GitHub Template
 
-If you created your project using the **"Use this template"** button on GitHub before Copier was available, follow these steps to adopt Copier for future updates.
-
-### 1. Make sure your work is committed
-
-```bash
-git status  # should be clean
-```
-
-### 2. Re-generate the project with Copier on top of your existing directory
-
-```bash
-copier copy --overwrite gh:SweatStack/sweatstack-streamlit-template .
-```
-
-Copier will ask the template questions. Answer them to match your current project (name, description, etc.). It will overwrite infrastructure files with the latest versions and leave a `.copier-answers.yml` file that tracks your template version.
-
-### 3. Review and commit
-
-```bash
-git diff
-```
-
-Review the changes. Your customisations in `streamlit_app.py` will have been overwritten by the starter template — restore your version:
-
-```bash
-git checkout -- streamlit_app.py
-```
-
-Do the same for any other files you had customised (e.g. `manifest.json`, `static/` icons).
-
-Commit the result:
-
-```bash
-git add -A
-git commit -m "Adopt Copier for template updates"
-```
-
-From now on, `copier update` will work as described above.
+Projects created with the **"Use this template"** button on GitHub, or with Copier before release 0.1.0, have no `.copier-answers.yml`, so `copier update` can't work for them yet. Adopting Copier is a one-time step: follow [UPGRADING.md, step 2b](UPGRADING.md#2b-projects-without-copier-answersyml).
 
 ## What's in the Template
 
