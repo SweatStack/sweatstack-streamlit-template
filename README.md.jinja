@@ -54,17 +54,81 @@ Open [http://localhost:8080](http://localhost:8080) in your browser.
 
 The `docker run` command above mounts the current directory, so changes to `streamlit_app.py` will be reflected after a browser refresh.
 
-### Environment Variables
+## Configuration
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `SWEATSTACK_CLIENT_ID` | OAuth client ID from SweatStack | Yes |
-| `SWEATSTACK_CLIENT_SECRET` | OAuth client secret from SweatStack | Yes |
-| `SECRET_KEY` | Secret key for encrypting cookies (min 32 chars) | Yes |
-| `APP_URL` | Public URL of the application | No (default: `http://localhost:8080`) |
-| `HTTPS_ONLY` | Set cookie secure flag (`true` for production) | No (default: `true`) |
-| `AUTO_LOGIN` | Redirect unauthenticated users to OAuth automatically | No (default: `false`) |
-| `UPSTREAM_URL` | Internal Streamlit URL | No (default: `http://localhost:8501`) |
+The proxy (`proxy.py`) is configured entirely with environment variables. Only the first three are required; every other setting has a default that suits most apps.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SWEATSTACK_CLIENT_ID` | *required* | OAuth client ID from SweatStack. |
+| `SWEATSTACK_CLIENT_SECRET` | *required* | OAuth client secret from SweatStack. |
+| `SECRET_KEY` | *required* | Key for encrypting the token cookie. Use a long random string (see above). Changing it logs everyone out. |
+| `APP_URL` | `http://localhost:8080` | Public URL of the app. Must match the redirect URI registered with SweatStack (`$APP_URL/auth/callback`). |
+| `HTTPS_ONLY` | `true` | Marks cookies `Secure`. Set to `false` only for local development over plain `http://`. |
+| `AUTO_LOGIN` | `false` | Send logged-out visitors straight to the SweatStack login instead of showing the app's logged-out page. If a login attempt fails, the user is not sent again for 5 minutes, so a broken login can't loop. |
+| `ALLOW_SIGNUP` | `true` | Set to `false` to only let people with an existing SweatStack account log in (sends `email_auth_mode=existing_only` to SweatStack). |
+| `FORWARD_REFRESH_TOKEN` | `true` | Also pass the user's refresh token to Streamlit. Read [Tokens in your app](#tokens-in-your-app) before using it. |
+| `PWA_INSTALL_BANNER` | `true` | Show logged-in users a banner inviting them to install the app. See [Installable app (PWA)](#installable-app-pwa). |
+| `UPSTREAM_URL` | `http://localhost:8501` | Where the proxy reaches Streamlit inside the container. You shouldn't need to change this. |
+
+On/off settings accept `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`. An unrecognised value is ignored with a warning in the logs, and the default applies.
+
+## Tokens in Your App
+
+The proxy keeps the user's SweatStack tokens in an encrypted, HTTP-only cookie: the browser stores it, but neither the browser's JavaScript nor your Streamlit code can read it. Instead, the proxy passes the tokens to Streamlit as request headers:
+
+| Header | Contains | When |
+|--------|----------|------|
+| `X-SweatStack-Token` | Access token (short-lived, about 15 minutes) | The user is logged in |
+| `X-SweatStack-Refresh-Token` | Refresh token (long-lived) | The user is logged in and `FORWARD_REFRESH_TOKEN` is not `false` |
+
+`StreamlitAuth.behind_proxy()` reads the access token for you, so most apps never touch these headers. Read them yourself with `st.context.headers`:
+
+```python
+refresh_token = st.context.headers.get("X-SweatStack-Refresh-Token")
+```
+
+**You can trust these values.** The proxy removes any `X-SweatStack-*` header sent by the browser before adding its own, so these headers only ever contain what the proxy put there. That holds only for traffic that goes through the proxy: never expose Streamlit's own port (8501) publicly. The included `Dockerfile` and `fly.toml` only expose the proxy (port 8080).
+
+### Things to know before using the refresh token
+
+The refresh token is mainly useful for work that happens *outside* a user's session, such as processing a webhook or running a scheduled job for a user who isn't using the app. A typical setup saves it when the user opens the app and uses it later from a background job.
+
+1. **It's a snapshot from when the page was opened.** Streamlit only sees request headers when the browser connects. That happens on page load and on reconnects, not on every interaction. The proxy refreshes tokens in the background, so during a long session the headers your app sees can be out of date. Reloading the page gives fresh ones.
+
+2. **A refresh token can stop working.** The proxy refreshes the user's tokens whenever the access token is about to expire. If SweatStack issues a *new* refresh token in that exchange ("rotation"), the old one may stop working, and the proxy stores the new one in the cookie. A copy you saved earlier can then be invalid. It works the other way too: if a background job uses the refresh token and receives a new one, the copy in the user's cookie may stop working, and the user has to log in again. To stay safe:
+   - **Save the token again on every session**: on page load, overwrite the stored copy. The user ID is the `sub` claim of the access token. Don't assume a stored copy stays valid forever.
+   - **If the token endpoint returns a new refresh token, save it** and use it from then on.
+   - **Expect `invalid_grant` errors.** When a stored token is rejected, mark that user as "needs to log in again" and stop retrying. It's an ordinary event, not an outage.
+   - **Don't refresh with it during the session.** Inside the Streamlit session, use the access token (`auth.client`) and leave refreshing to the proxy, so the cookie and your copy can't conflict.
+
+3. **Treat it like a password.** It gives long-term access to the user's data. Never show it in the UI or write it to logs, and remember that `st.write(st.context.headers)` or an error tracker that records request headers would expose it. If you store it, encrypt it at rest.
+
+4. **Not needed? Turn it off.** If your app has no use for the refresh token, set `FORWARD_REFRESH_TOKEN=false` so it never reaches your code.
+
+## Installable App (PWA)
+
+The app can be installed to the home screen (iOS, Android) or as a desktop app (Chrome, Edge). With `manifest.json` in place this works out of the box:
+
+- **Manifest and icons.** `manifest.json` sets the name and colors; the icons live in `static/`.
+- **Service worker** (`static/sw.js`, served at `/sw.js`). Chrome requires one before it offers installation. It caches nothing, so every deploy is visible right away; its only other job is to show a short "You're offline" page when a page load fails without a connection.
+- **iOS launch screens.** iOS only shows a launch screen if one matches the exact screen size. The proxy generates them on demand for current iPhones and iPads: the 512px icon centred on `background_color`. To use your own design for a size, add `static/splash-<width>x<height>.png` (e.g. `splash-1179x2556.png`); it takes precedence.
+- **Install banner** (`static/install-banner.js`). A bar at the bottom of the page, in your `theme_color` (text switches between black and white for contrast), shown to **logged-in users only**:
+  - *Chrome, Edge, Samsung Internet (Android and desktop):* "Install *App name*" with an **Install** button that opens the browser's install dialog. It only appears once the browser reports the app as installable and not yet installed.
+  - *iPhone and iPad:* instructions to tap Share, then "Add to Home Screen" (iOS has no install button that websites can trigger).
+  - *Other browsers, or when the app is already installed:* nothing.
+
+  Closing the banner hides it for 30 days in that browser. For logged-out visitors the browser's own install prompt is suppressed as well, so nobody is asked to install the login page. Turn the banner off with `PWA_INSTALL_BANNER=false`; the app stays installable from the browser menu.
+
+To customise:
+
+1. Edit **`manifest.json`**: set `name`, `short_name`, `theme_color` and `background_color` (use hex colors, e.g. `#ff6600`).
+2. Replace the icons in **`static/`** with your own (keep the filenames):
+   - `icon-192x192.png`: Android home screen icon
+   - `icon-512x512.png`: Android splash screen and generated iOS launch screens
+   - `icon-180x180.png`: iOS home screen icon
+
+If `manifest.json` is removed, all PWA features are disabled.
 
 ## Customizing Your App
 
@@ -76,18 +140,6 @@ Edit `streamlit_app.py` to build your application. The template provides:
 - `auth.logout_button()` — Logout button widget
 
 Read the documentation for the SweatStack Python library and its Streamlit integration [here](https://docs.sweatstack.no/learn/integrations/streamlit/).
-
-## PWA / Add to Homescreen
-
-The template supports installing your app to the homescreen on iOS and Android. To customize:
-
-1. Edit **`manifest.json`** — Set `name`, `short_name`, `theme_color`, and `background_color`.
-2. Replace the icons in **`static/`** with your own (keep the filenames):
-   - `icon-192x192.png` — Android homescreen icon
-   - `icon-512x512.png` — Android splash screen
-   - `icon-180x180.png` — iOS homescreen icon
-
-If `manifest.json` is removed, all PWA features are disabled.
 
 ## Production Deployment
 
@@ -128,6 +180,8 @@ copier update
 ```
 
 Copier performs a three-way merge, so your customisations are preserved. Only lines changed by both you and the template will produce conflicts.
+
+Before updating, read the [changelog](https://github.com/SweatStack/sweatstack-streamlit-template/blob/main/CHANGELOG.md). Its *Updating* section has step-by-step instructions (written so you can also hand them to a coding agent), including for projects created before the template used Copier.
 
 ## License
 

@@ -77,7 +77,9 @@ copier update
 Copier performs a three-way merge (old template, new template, your files), so your customisations are preserved. Only lines that *both* sides changed will produce a conflict.
 
 > [!TIP]
-> Template updates are tracked via git tags. Run `copier update` periodically to stay current.
+> `copier update` pulls in the latest version of the template from `main`. Run it periodically to stay current.
+
+Each release is described in the [changelog](CHANGELOG.md). Its *Updating* section has step-by-step upgrade instructions, written so you can also hand them to a coding agent.
 
 ## Migrating from the GitHub Template
 
@@ -129,6 +131,7 @@ From now on, `copier update` will work as described above.
 | `streamlit_app.py` | Your Streamlit application |
 | `manifest.json` | PWA app name, colors, icons |
 | `static/icon-*.png` | Homescreen icons (192, 512, 180px) |
+| `static/splash-*.png` | Optional custom iOS launch screens (generated from the icon if absent) |
 | `.env` / `.env.production` | Environment variables and secrets |
 
 ### Infrastructure (updated via Copier)
@@ -139,6 +142,8 @@ From now on, `copier update` will work as described above.
 | `Dockerfile` | Multi-stage build running proxy + Streamlit |
 | `supervisord.conf` | Process manager for the two services |
 | `.streamlit/config.toml` | Streamlit settings required for the proxy setup |
+| `static/sw.js` | Service worker that makes the app installable |
+| `static/install-banner.js` | "Install this app" banner for logged-in users |
 
 ## Why This Template Exists
 
@@ -146,8 +151,11 @@ Streamlit doesn't have good support for user sessions out of the box. This templ
 
 1. Handles the OAuth flow with SweatStack
 2. Stores tokens in encrypted, HTTP-only cookies
-3. Injects the access token as a header into requests to Streamlit
+3. Passes the access token (and, by default, the refresh token) to Streamlit as request headers
 4. Automatically refreshes tokens before they expire
+5. Makes the app installable as a PWA on iOS, Android and desktop
+
+Everything is configured with environment variables; see *Configuration* in the generated project's README.
 
 ## Customizing Your App
 

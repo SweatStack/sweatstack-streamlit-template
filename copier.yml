@@ -1,7 +1,13 @@
 _min_copier_version: "9.0.0"
 
+# Setting _exclude replaces Copier's defaults, so they are repeated here.
+# Without .git, generating a project would copy this repository's history into it.
 _exclude:
   - copier.yml
+  - .git
+  - __pycache__
+  - "*.py[co]"
+  - "~*"
   - PLAN.md
   - plans/
   - "*.patch"
@@ -10,6 +16,7 @@ _exclude:
   - .DS_Store
   - .claude/
   - uv.lock
+  - CHANGELOG.md
 
 project_name:
   type: str
