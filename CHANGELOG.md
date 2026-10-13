@@ -18,6 +18,18 @@ Types of changes:
 Releases are not tagged. `copier update` always moves a project to the latest commit on `main`, and each release below is identified by its version and date. To update a project, follow [UPGRADING.md](UPGRADING.md) together with the **Upgrade notes** of each release you cross.
 
 
+## [0.2.1] - 2026-10-13
+
+### Fixed
+- **`copier update` no longer replaces your app icons.** Copier can't merge binary files, so every update overwrote `static/icon-*.png` with the template's icons, without a conflict or warning, even though the template hadn't changed them. Once a project has its icons, Copier now leaves them alone.
+
+### Changed
+- **[UPGRADING.md](UPGRADING.md) was tested on real upgrades and revised.** Projects without `.copier-answers.yml` now record the template version they started from and then update like any other project, so Copier merges their changes instead of overwriting files that you then restore by hand. A new verification step compares the infrastructure files with the template, which catches template fixes an update didn't apply.
+
+### Upgrade notes
+- **If an earlier update replaced your icons**, restore them from the commit before that update, e.g. `git checkout <commit-before-the-update> -- static/icon-180x180.png static/icon-192x192.png static/icon-512x512.png`. `git log --oneline -- static/icon-512x512.png` shows which commits changed them.
+
+
 ## [0.2.0] - 2026-10-12
 
 Requires `sweatstack` `0.94.0` or later, which fixes two problems in the library's Streamlit and FastAPI integrations. Every app built from this template should upgrade, whichever template version it started from.
@@ -33,7 +45,7 @@ Requires `sweatstack` `0.94.0` or later, which fixes two problems in the library
 
 ### Upgrade notes
 - **Upgrade `sweatstack` in every deployed app**: after `copier update`, run `uv lock --upgrade-package sweatstack`, check that `uv.lock` now has `0.94.0` or later, and redeploy. `copier update` alone doesn't change the locked version.
-- **Remove `FORWARD_REFRESH_TOKEN`** from `.env`, `.env.production` and your hosting secrets (e.g. `fly secrets unset FORWARD_REFRESH_TOKEN`).
+- **Remove `FORWARD_REFRESH_TOKEN`** from `.env`, `.env.production`, `.env.template` and your hosting secrets (e.g. `fly secrets unset FORWARD_REFRESH_TOKEN`).
 - **Remove workarounds for expiring tokens**, such as forced page reloads, or `auth` / `auth.client` kept in `st.cache_resource` or module-level variables. Call `StreamlitAuth.behind_proxy()` at the top of every run instead.
 - **If you store the refresh token** for background jobs, re-read "Using the refresh token yourself" in the README; the advice is shorter now that SweatStack's refresh behaviour is documented.
 
@@ -43,7 +55,7 @@ Requires `sweatstack` `0.94.0` or later, which fixes two problems in the library
 First versioned release. Projects generated before this have no version recorded and should treat everything below as new; see [UPGRADING.md](UPGRADING.md).
 
 ### Added
-- **Refresh token for the Streamlit app.** Besides the access token (`X-SweatStack-Token`), the proxy now passes the user's refresh token to Streamlit as `X-SweatStack-Refresh-Token`, so an app can, for example, store it for webhooks or scheduled jobs. On by default; disable with `FORWARD_REFRESH_TOKEN=false`. Read "Tokens in your app" in the generated README first: the header is a snapshot from page load, and with refresh-token rotation a stored copy can stop working.
+- **Refresh token for the Streamlit app.** Besides the access token (`X-SweatStack-Token`), the proxy now passes the user's refresh token to Streamlit as `X-SweatStack-Refresh-Token`, so an app can, for example, store it for webhooks or scheduled jobs. On by default; disable with `FORWARD_REFRESH_TOKEN=false`. Read "Tokens in your app" in the template's README ([README.md.jinja](README.md.jinja); your project's README may no longer have it) first: the header is a snapshot from page load, and with refresh-token rotation a stored copy can stop working.
 - **`ALLOW_SIGNUP`** (default `true`). Set to `false` to let only people with an existing SweatStack account log in (sends `email_auth_mode=existing_only` to the SweatStack authorize endpoint).
 - **Installable app, complete.**
   - A service worker (`static/sw.js`, served at `/sw.js`), required by Chrome before it offers installation. It caches nothing, so deploys are visible immediately, and shows a "You're offline" page when a page load fails without a connection.
@@ -70,8 +82,8 @@ First versioned release. Projects generated before this have no version recorded
 - **The old `.env.template` placeholder `HTTPS_ONLY=only_set_to_false_for_local_development` now means `true`** (secure cookies) instead of silently meaning `false`.
 
 ### Upgrade notes
-- **Check `HTTPS_ONLY`.** If `.env` or your hosting secrets still contain the old placeholder value, cookies are now marked `Secure`. That is right for production. For local development over `http://`, set `HTTPS_ONLY=false` explicitly.
-- **Your app now receives the refresh token.** If you don't use it, set `FORWARD_REFRESH_TOKEN=false`. If you do, read "Tokens in your app" in the generated README.
+- **Replace the old `HTTPS_ONLY` placeholder** (`only_set_to_false_for_local_development`) wherever it is set: `.env`, `.env.production` and your hosting secrets. It used to mean `false`, so production cookies weren't marked `Secure`; it now means `true`. Set an explicit value instead: `HTTPS_ONLY=true` in production, `HTTPS_ONLY=false` for local development over `http://`.
+- **Your app now receives the refresh token.** If you don't use it, set `FORWARD_REFRESH_TOKEN=false`. If you do, read "Tokens in your app" in the template's README ([README.md.jinja](README.md.jinja); your project's README may no longer have it).
 - **Install `pillow`**: run `uv sync` after updating `pyproject.toml`.
 - **Common customisations of `proxy.py` that are now built in**: remove them during the update.
 
@@ -80,7 +92,8 @@ First versioned release. Projects generated before this have no version recorded
   | A custom install / add-to-home-screen banner | The built-in banner. Its name and colors come from `manifest.json`. To change its behaviour, edit `static/install-banner.js`. |
   | A `/sw.js` route or service worker | The built-in `static/sw.js`. Delete any older custom `sw.js` unless it does something the built-in one doesn't. |
   | `apple-touch-startup-image` tags and splash images | Built-in launch screens. Rename custom images to `static/splash-<width>x<height>.png` (pixel sizes, e.g. `splash-1179x2556.png`) to keep using them. |
-  | `email_auth_mode=existing_only` in the login parameters | `ALLOW_SIGNUP=false` |
+  | `email_auth_mode=existing_only` in the login parameters | `ALLOW_SIGNUP=false`, set in `.env`, `.env.production` **and your hosting secrets** (e.g. `fly secrets set ALLOW_SIGNUP=false`). Without it, production starts allowing new sign-ups. |
+  | A custom `apple-touch-icon` (another file name or format, e.g. `icon-180x180.jpg`) | Save it as `static/icon-180x180.png`, which the template links to. |
   | `Cache-Control` changes for HTML pages | Nothing; now built in. |
-  | Code that stores tokens or sends them to another service (e.g. for webhooks) | Move it into the Streamlit app and read the refresh token from the `X-SweatStack-Refresh-Token` header. Follow "Tokens in your app" in the generated README, especially the advice on rotation. |
+  | Code that stores tokens or sends them to another service (e.g. for webhooks) | Move it into the Streamlit app and read the refresh token from the `X-SweatStack-Refresh-Token` header. Follow "Tokens in your app" in the template's README ([README.md.jinja](README.md.jinja); your project's README may no longer have it). |
   | A changed auto-login "auth attempted" cookie, or `asyncio.gather` in the WebSocket relay | The template versions. These are the auto-login and WebSocket fixes above; older copies lack them. |

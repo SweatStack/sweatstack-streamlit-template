@@ -99,7 +99,7 @@ refresh_token = st.context.headers.get("X-SweatStack-Refresh-Token")
 ```
 
 - **Save it again on every session**, overwriting the stored copy. The user ID is the `sub` claim of the access token.
-- **Refreshing doesn't replace it.** SweatStack returns the same refresh token when you refresh, so your background job and the user's session never invalidate each other. If a refresh response ever contains a different refresh token, store that one and use it from then on.
+- **Refreshing doesn't replace it.** SweatStack returns the same refresh token when you refresh, so your background job and the user's session never invalidate each other. If a refresh response your job receives ever contains a different refresh token, store that one and use it from then on.
 - **Expect `invalid_grant` errors**, for example when a user revokes your app's access. Mark that user as "needs to log in again" and stop retrying; it's an ordinary event, not an outage.
 - **Treat it like a password.** It gives long-term access to the user's data. Never show it in the UI or write it to logs, and remember that `st.write(st.context.headers)` or an error tracker that records request headers would expose it. If you store it, encrypt it at rest.
 

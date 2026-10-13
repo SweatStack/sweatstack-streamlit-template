@@ -20,6 +20,12 @@ _exclude:
   - CHANGELOG.md
   - UPGRADING.md
 
+# Copier can't merge binary files: on every update it replaces them with the
+# template's version, even when the template didn't change them. Never touch
+# the project's own icons once they exist.
+_skip_if_exists:
+  - "static/icon-*.png"
+
 project_name:
   type: str
   help: Human-readable name for your app (e.g. "My Cycling Dashboard")
