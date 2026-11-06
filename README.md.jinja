@@ -14,6 +14,8 @@ Set the redirect URI to your callback URL:
 - Local development: `http://localhost:8080/auth/callback`
 - Production: `https://yourdomain.com/auth/callback`
 
+On the app's **Consent screen** tab, select the data your app uses and write a purpose for each one. Other people can't sign in to a public app until you do. See [Data Access](#data-access).
+
 Note down your **Client ID** and **Client Secret**.
 
 ### 2. Configure Environment
@@ -67,10 +69,31 @@ The proxy (`proxy.py`) is configured entirely with environment variables. Only t
 | `HTTPS_ONLY` | `true` | Marks cookies `Secure`. Set to `false` only for local development over plain `http://`. |
 | `AUTO_LOGIN` | `false` | Send logged-out visitors straight to the SweatStack login instead of showing the app's logged-out page. If a login attempt fails, the user is not sent again for 5 minutes, so a broken login can't loop. |
 | `ALLOW_SIGNUP` | `true` | Set to `false` to only let people with an existing SweatStack account log in (sends `email_auth_mode=existing_only` to SweatStack). |
+| `OAUTH_SCOPES` | `activities:read sharing:read profile` | What the app asks access to, separated by spaces. See [Data Access](#data-access). |
 | `PWA_INSTALL_BANNER` | `true` | Show logged-in users a banner inviting them to install the app. See [Installable app (PWA)](#installable-app-pwa). |
 | `UPSTREAM_URL` | `http://localhost:8501` | Where the proxy reaches Streamlit inside the container. You shouldn't need to change this. |
 
 On/off settings accept `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`. An unrecognised value is ignored with a warning in the logs, and the default applies.
+
+## Data Access
+
+`OAUTH_SCOPES` sets what the app asks access to. The default matches the starter app: activities for `select_activity`, `sharing:read` for `select_user`. Remove `sharing:read` if you remove `select_user`, because it adds the consent line "Act for the people who share their data with you".
+
+| Scope | Gives access to |
+|-------|-----------------|
+| `activities:read`, `activities:write` | Activities |
+| `wellness:read`, `wellness:write` | Sleep, HRV, daily wellness |
+| `reproductive_health:read`, `reproductive_health:write` | Reproductive health |
+| `workouts:read`, `workouts:write` | Workouts |
+| `sharing:read`, `sharing:write` | People who share their data with you |
+| `email` | Email address |
+| `profile` | Name |
+
+See the [full list of scopes](https://docs.sweatstack.no/learn/applications/scopes/).
+
+Each of these except `profile` needs a purpose on the app's **Consent screen** tab, and adding one to `OAUTH_SCOPES` before saving its purpose locks out everyone but you.
+
+**Test with a new account.** Tokens carry everything an athlete has ever granted the app, so a missing scope only fails for new athletes, and never for you.
 
 ## Tokens in Your App
 
@@ -116,6 +139,8 @@ The app can be installed to the home screen (iOS, Android) or as a desktop app (
   - *Other browsers, or when the app is already installed:* nothing.
 
   Closing the banner hides it for 30 days in that browser. For logged-out visitors the browser's own install prompt is suppressed as well, so nobody is asked to install the login page. Turn the banner off with `PWA_INSTALL_BANNER=false`; the app stays installable from the browser menu.
+
+If sign-in hands over to another app such as Garmin Connect, it finishes in the phone's default browser and the installed app stays signed out.
 
 To customise:
 

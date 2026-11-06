@@ -13,6 +13,7 @@ _exclude:
   - "*.patch"
   - test_proxy_e2e.py
   - test_token_renewal_e2e.py
+  - test_sign_in_e2e.py
   - META_TAGS.md
   - .DS_Store
   - .claude/

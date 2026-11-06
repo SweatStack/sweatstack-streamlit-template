@@ -18,6 +18,28 @@ Types of changes:
 Releases are not tagged. `copier update` always moves a project to the latest commit on `main`, and each release below is identified by its version and date. To update a project, follow [UPGRADING.md](UPGRADING.md) together with the **Upgrade notes** of each release you cross.
 
 
+## [0.3.0] - 2026-11-06
+
+**Do the first upgrade note before you deploy, or other people can't sign in.**
+
+### Fixed
+- **A sign-in that finishes in another browser now works.** When an in-app browser or Garmin Connect moved the sign-in to another browser, the user landed signed out with no message. The sign-in now restarts once in that browser, usually without a screen, and lands on the requested page. The same recovery covers a sign-in that takes longer than 10 minutes.
+- **Failed sign-ins show a message** with a Try again button, instead of silently returning to the app.
+- **Apps registered since 2026-10-13 can sign in.** SweatStack refuses `data:read` from them with `invalid_scope`.
+
+### Changed
+- **The proxy requests category scopes**: `activities:read sharing:read profile` by default, set with the new `OAUTH_SCOPES`. It no longer sends `data:read`, a comma separator or `prompt=none`. Existing athletes aren't asked for consent again.
+
+### Removed
+- **The `return_to` cookie.** The page travels in the OAuth `state`.
+
+### Upgrade notes
+1. **Before deploying, write your purposes.** List the data your app uses (see "Data Access" in the template's [README.md.jinja](README.md.jinja)). On your app's **Consent screen** tab at app.sweatstack.no, select those categories and write a purpose for each. Without this, everyone but you gets a "not ready" page, and you won't see it yourself.
+2. **If your app uses more than activities and `select_user`** (wellness, workouts, email...), set `OAUTH_SCOPES` in `.env`, `.env.production` and your hosting secrets. Removing `sharing:read` is fine if you removed `select_user`.
+3. **Check with an account that has never used the app**: it should see the expected consent lines and every page should load. Existing accounts keep their old, wider grant, so they can't reveal a missing scope.
+4. **If your `proxy.py` reads the `return_to` cookie**, read the page from `_parse_state` instead.
+
+
 ## [0.2.1] - 2026-10-13
 
 ### Fixed

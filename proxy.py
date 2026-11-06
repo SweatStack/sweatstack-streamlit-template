@@ -55,7 +55,6 @@ SWEATSTACK_CLIENT_ID = os.getenv("SWEATSTACK_CLIENT_ID")
 SWEATSTACK_CLIENT_SECRET = os.getenv("SWEATSTACK_CLIENT_SECRET")
 
 TOKEN_COOKIE_NAME = "sweatstack_tokens"
-RETURN_TO_COOKIE_NAME = "return_to"
 AUTH_ATTEMPTED_COOKIE_NAME = "auth_attempted"
 TOKEN_REFRESH_THRESHOLD_SECONDS = 20
 COOKIE_MAX_AGE_SECONDS = 86400 * 365  # 365 days
@@ -69,6 +68,29 @@ HTTPS_ONLY = _env_flag("HTTPS_ONLY", True)
 AUTO_LOGIN = _env_flag("AUTO_LOGIN", False)
 ALLOW_SIGNUP = _env_flag("ALLOW_SIGNUP", True)
 PWA_INSTALL_BANNER = _env_flag("PWA_INSTALL_BANNER", True)
+
+DEFAULT_OAUTH_SCOPES = "activities:read sharing:read profile"
+RETIRED_SCOPES = frozenset({"data:read", "data:write"})
+
+
+def _parse_oauth_scopes(raw: str) -> str:
+    """Normalize OAUTH_SCOPES to a space-separated string; empty means the default.
+
+    A comma or a retired scope stops startup: either would otherwise surface only as a
+    failed sign-in, and for some users only.
+    """
+    scopes = raw.split()
+    if not scopes:
+        return DEFAULT_OAUTH_SCOPES
+    if "," in raw or RETIRED_SCOPES.intersection(scopes):
+        raise RuntimeError(
+            f"Invalid OAUTH_SCOPES {raw!r}: separate scopes with spaces and use category scopes "
+            "such as activities:read. See 'Data Access' in README.md."
+        )
+    return " ".join(scopes)
+
+
+OAUTH_SCOPES = _parse_oauth_scopes(os.getenv("OAUTH_SCOPES", ""))
 
 if os.getenv("FORWARD_REFRESH_TOKEN") is not None:
     logger.warning(
@@ -116,6 +138,16 @@ def _manifest_color(key: str) -> str:
         logger.warning("Invalid %s %r in manifest.json, using #ffffff", key, value)
         return "#ffffff"
     return value
+
+
+def _contrast_color(color: str) -> str:
+    """Black or white, whichever reads best on ``color``. Same formula as textColorFor in static/install-banner.js."""
+    channels = [
+        channel / 255 / 12.92 if channel / 255 <= 0.03928 else ((channel / 255 + 0.055) / 1.055) ** 2.4
+        for channel in ImageColor.getrgb(color)[:3]
+    ]
+    luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    return "#000000" if luminance > 0.179 else "#ffffff"
 
 
 def _versioned_static_url(path: Path) -> str:
@@ -403,6 +435,36 @@ def _prepare_ws_connection_args(
 app = FastAPI()
 
 STATE_COOKIE_NAME = "oauth_state"
+FIRST_ATTEMPT, RETRY_ATTEMPT = 1, 2
+MAX_STATE_NEXT_BYTES = 1024
+
+
+class OAuthState(NamedTuple):
+    attempt: int
+    next_url: str
+
+
+def _build_state(attempt: int, next_url: str) -> str:
+    """Build `{nonce}.{attempt}.{next}`. The attempt and page ride in the URL because cookies
+    are exactly what is missing after a browser switch. An overlong page falls back to `/`,
+    since the whole state must fit in the state cookie."""
+    raw = next_url.encode()
+    if next_url == "/" or len(raw) > MAX_STATE_NEXT_BYTES:
+        raw = b""
+    page = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    return f"{secrets.token_urlsafe(32)}.{attempt}.{page}"
+
+
+def _parse_state(state: str | None) -> OAuthState | None:
+    """Parse a state from the URL, which anyone can edit. None means it isn't ours: no retry."""
+    try:
+        nonce, attempt, page = (state or "").split(".")
+        next_url = base64.urlsafe_b64decode(page + "=" * (-len(page) % 4)).decode()
+    except ValueError:  # includes binascii.Error and UnicodeDecodeError
+        return None
+    if not nonce or attempt not in {"1", "2"}:
+        return None
+    return OAuthState(int(attempt), _validate_return_url(next_url))
 
 
 def _set_state_cookie(response: Response, state: str) -> None:
@@ -437,19 +499,53 @@ def _set_auth_attempted_cookie(response: Response) -> None:
     )
 
 
+def _sign_in_failed_response(next_url: str) -> Response:
+    """The page shown when a sign-in can't be completed or restarted.
+
+    It trips the auto-login circuit breaker, and Try again is the only way onward.
+    """
+    background = _manifest_color("background_color")
+    button = _manifest_color("theme_color")
+    text_color = _contrast_color(background)
+    # next_url is attacker-controlled: quote(safe='') is what makes it safe in this attribute.
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign-in didn't finish</title>
+</head>
+<body style="margin:0;padding:2rem;font-family:system-ui,sans-serif;text-align:center;background:{html.escape(background)};color:{text_color}">
+<h1>Sign-in didn't finish</h1>
+<p>Try again in this browser.</p>
+<a href="/login?next={quote(next_url, safe='')}" style="display:inline-block;padding:.75rem 1.5rem;border-radius:.5rem;text-decoration:none;background:{html.escape(button)};color:{_contrast_color(button)};border:1px solid {text_color}">Try again</a>
+</body>
+</html>
+"""
+    response = Response(
+        content=page,
+        status_code=400,
+        media_type="text/html; charset=utf-8",
+        headers={"cache-control": "no-store"},
+    )
+    _set_auth_attempted_cookie(response)
+    return response
+
+
 @app.get("/login")
 async def login(request: Request):
     """Initiate OAuth2 login with SweatStack."""
-    state = secrets.token_urlsafe(32)
+    attempt = RETRY_ATTEMPT if request.query_params.get("retry") == "1" else FIRST_ATTEMPT
+    next_url = _validate_return_url(request.query_params.get("next", ""))
+    state = _build_state(attempt, next_url)
     redirect_uri = f"{APP_URL}/auth/callback"
 
     params = {
         "client_id": SWEATSTACK_CLIENT_ID,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "data:read,profile",
+        "scope": OAUTH_SCOPES,
         "state": state,
-        "prompt": "none",
     }
     if not ALLOW_SIGNUP:
         params["email_auth_mode"] = "existing_only"
@@ -458,82 +554,91 @@ async def login(request: Request):
     response = RedirectResponse(url=auth_url)
     _set_state_cookie(response, state)
 
-    # Only set return_to when explicitly provided — error retries hit /login
-    # without ?next=, and must not overwrite the cookie.
-    next_url = request.query_params.get("next")
-    if next_url is not None:
-        response.set_cookie(
-            RETURN_TO_COOKIE_NAME,
-            _validate_return_url(next_url),
-            httponly=True,
-            secure=HTTPS_ONLY,
-            samesite="lax",
-            max_age=600,
-        )
-
     logger.info("Login initiated, redirect_uri=%s", redirect_uri)
+    return response
+
+
+async def _exchange_code(code: str) -> TokenData | None:
+    """Exchange an authorization code for tokens. Returns None, after logging, if that fails."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                SWEATSTACK_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": f"{APP_URL}/auth/callback",
+                    "client_id": SWEATSTACK_CLIENT_ID,
+                    "client_secret": SWEATSTACK_CLIENT_SECRET,
+                },
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("Sign-in failed: token exchange: %s: %s", type(exc).__name__, exc)
+        return None
+    if response.status_code != 200:
+        logger.warning("Sign-in failed: token exchange: status=%d", response.status_code)
+        return None
+    try:
+        token_data = response.json()
+    except ValueError:
+        logger.warning("Sign-in failed: token exchange: invalid JSON")
+        return None
+    if not isinstance(token_data, dict) or not token_data.get("access_token"):
+        logger.warning("Sign-in failed: token exchange: no access_token")
+        return None
+    return token_data
+
+
+async def _finish_verified_sign_in(request: Request, code: str | None, next_url: str) -> Response:
+    """Rows 1 to 3 of the callback: the state matched, so it is used up whatever happens next."""
+    if code:
+        token_data = await _exchange_code(code)
+    else:
+        logger.warning("Sign-in failed: SweatStack returned error %r", request.query_params.get("error"))
+        token_data = None
+
+    if token_data is None:
+        response = _sign_in_failed_response(next_url)
+        response.delete_cookie(STATE_COOKIE_NAME)
+        return response
+
+    expires_at = time.time() + token_data.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
+    cookie_value = _encode_token_cookie(token_data["access_token"], token_data.get("refresh_token") or "", expires_at)
+    response = RedirectResponse(url=next_url)
+    response.delete_cookie(STATE_COOKIE_NAME)
+    response.delete_cookie(AUTH_ATTEMPTED_COOKIE_NAME)
+    _set_token_cookie(response, cookie_value)
+    logger.info("User authenticated successfully")
     return response
 
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
-    """Handle OAuth callback and store tokens in encrypted cookie."""
-    return_to = _validate_return_url(request.cookies.get(RETURN_TO_COOKIE_NAME, "/"))
-
-    # Verify state
-    state_from_cookie = request.cookies.get(STATE_COOKIE_NAME)
-    state_from_params = request.query_params.get("state")
-
-    if not state_from_cookie or state_from_cookie != state_from_params:
-        logger.warning("State mismatch: cookie=%s, param=%s", state_from_cookie, state_from_params)
-        response = RedirectResponse(url=return_to)
-        _set_auth_attempted_cookie(response)
-        return response
-
+    """Finish sign-in. A code is only ever exchanged in the browser that started the flow."""
+    state = request.query_params.get("state")
     code = request.query_params.get("code")
-    if not code:
-        logger.warning("No authorization code received")
-        response = RedirectResponse(url=return_to)
-        _set_auth_attempted_cookie(response)
+    state_cookie = request.cookies.get(STATE_COOKIE_NAME)
+    parsed = _parse_state(state)
+    next_url = parsed.next_url if parsed else "/"
+
+    if state_cookie and state_cookie == state:
+        return await _finish_verified_sign_in(request, code, next_url)
+
+    tokens = await _get_valid_tokens(request.cookies)
+    if tokens.access_token:
+        response = RedirectResponse(url=next_url)
+        if tokens.new_cookie:
+            _set_token_cookie(response, tokens.new_cookie)
         return response
 
-    # Exchange code for tokens
-    redirect_uri = f"{APP_URL}/auth/callback"
-    async with httpx.AsyncClient() as client:
-        token_response = await client.post(
-            SWEATSTACK_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "client_id": SWEATSTACK_CLIENT_ID,
-                "client_secret": SWEATSTACK_CLIENT_SECRET,
-            },
-        )
-
-    if token_response.status_code != 200:
-        logger.warning("Token exchange failed: %s", token_response.text)
-        response = RedirectResponse(url=return_to)
-        _set_auth_attempted_cookie(response)
-        return response
-
-    token_data = token_response.json()
-    access_token = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
-    expires_in = token_data.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
-
-    response = RedirectResponse(url=return_to)
-    response.delete_cookie(STATE_COOKIE_NAME)
-    response.delete_cookie(RETURN_TO_COOKIE_NAME)
-    response.delete_cookie(AUTH_ATTEMPTED_COOKIE_NAME)
-
-    if access_token:
-        expires_at = time.time() + expires_in
-        cookie_value = _encode_token_cookie(access_token, refresh_token or "", expires_at)
-        _set_token_cookie(response, cookie_value)
-        logger.info("User authenticated successfully")
-
-    return response
+    if state_cookie:
+        logger.warning("Sign-in failed: state mismatch")
+    elif code and parsed and parsed.attempt == FIRST_ATTEMPT:
+        logger.warning("Sign-in restarted: no state cookie")
+        return RedirectResponse(url=f"/login?retry=1&next={quote(next_url, safe='')}")
+    else:
+        logger.warning("Sign-in failed: no state cookie")
+    return _sign_in_failed_response(next_url)
 
 
 @app.get("/logout")

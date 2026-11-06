@@ -41,6 +41,8 @@ Create a new application at [app.sweatstack.no/applications/new](https://app.swe
 
 Set the redirect URI to `http://localhost:8080/auth/callback` for local development.
 
+On the app's **Consent screen** tab, select the data your app uses and write a purpose for each one. Other people can't sign in to a public app until you do. See *Data Access* in the generated project's [README](README.md.jinja).
+
 Note your **Client ID** and **Client Secret** and edit `.env`:
 
 ```
