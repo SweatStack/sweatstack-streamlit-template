@@ -1,8 +1,8 @@
 # Plan 005: Only the proxy holds the refresh token
 
-Status: ready for implementation (2026-11-19). Release: `0.4.0`, with a `sweatstack` release that the
-template then requires. Must be released before SweatStack refuses used refresh tokens for template
-apps (see fact 3).
+Status: released (2026-11-19) as template 0.4.0, requiring `sweatstack` 0.103.0; see section 10 for
+what the build settled. Release: `0.4.0`, with a `sweatstack` release that the template then requires. Must be
+released before SweatStack refuses used refresh tokens for template apps (see fact 3).
 
 This plan is complete. Every decision is made; do not reopen one without hitting a stop condition
 (section 9). Sections 1 to 3 explain why. Sections 4 to 9 are what to do.
@@ -133,7 +133,7 @@ Extend the existing end-to-end tests (real proxy, Streamlit, SDK and Chromium; o
 
 ## 7. Known limits
 
-- **A lost refresh response not retried within 30 seconds** (a laptop closed mid-request, a phone that loses its connection for longer) leaves the cookie with a retired token. In Phase 2 its next use ends the sign-in, and the user signs in again. Inherent to rotation without server-side storage; the window is SweatStack's grace period (fact 2).
+- **A lost refresh response followed by a proxy restart.** The proxy answers a cookie that holds a retired token from memory (section 10, D3), for up to a day. A restart empties that memory: a browser whose cookie missed a refresh and that comes back only after the restart (and after SweatStack's 30-second grace period) presents a retired token, and in Phase 2 that ends the sign-in, so the user signs in again. Inherent to rotation without server-side storage.
 - **A tab whose script cannot run** (frozen by the browser and never made visible again) is not kept fresh; when it is used again, D5's `visibilitychange` call and D7's wait cover it. If they do not, the user sees the reload hint, never a wrong account or a broken page.
 - **One machine** (D11).
 
@@ -153,3 +153,78 @@ Stop and ask if:
 - `st.context.headers` does not carry `X-SweatStack-Session` on the handshake (fact 9).
 - `scope["server"]` does not tell the two sockets of D12 apart, or `uvicorn.Server.serve(sockets=...)` does not serve both.
 - Any end-to-end check in section 5 needs a sleep longer than the token lifetime plus 30 seconds to pass.
+
+None was hit. The first and third were checked by a spike before the build (Chromium stored an
+`HttpOnly` cookie from a `101` and sent it on the next request; `scope["server"]` reported 18080 and
+18081 for the two sockets, also for a loopback caller sending `X-Forwarded-For`).
+
+## 10. What the build settled
+
+No decision was reopened. These are the details the plan left open, and the places the build went
+beyond its wording, each with the reason.
+
+- **D3: the last refresh is reused in process until the next one replaces it.** `_Session.last_refresh`
+  keeps the digest of the refresh token a refresh presented, its result and the time. A request that
+  presents that retired token gets the result again and rewrites its cookie with it, without a token
+  request: it carries the cookie from before the response that carried the new one, which may never
+  have reached the browser. If that result's access token needs a refresh by now, its refresh token
+  (the successor, which SweatStack still takes) is refreshed instead, never the retired one. Kept at
+  most `LAST_REFRESH_KEPT_SECONDS` (a day). The proxy holds this in memory only; it is the same
+  holder. D15's `outcome` gains `reused`. This was first built with a 30-second limit; the
+  independent review below showed why that was wrong.
+- **D3: what a failed refresh does.** `invalid_grant` deletes the cookie (`Tokens.signed_out`); any
+  other failure (network, 5xx, a 15-second timeout) keeps it and serves a still-valid access token
+  if there is one (`Tokens.failed`). `POST /_proxy/refresh` answers 503 for any failed refresh, also
+  while the old token still works, and the page retries after 10 seconds: a refresh SweatStack
+  committed but whose answer was lost is then retried within its grace period and gets the same
+  successor.
+- **D3: a response that refreshed always carries the new cookie, also when Streamlit is down.** An
+  HTTP request whose upstream fails answers 502 with the cookie; a WebSocket handshake whose upstream
+  fails is accepted with the cookie on its `101` and closed (1011), and the page reconnects.
+- **D3: `Tokens` no longer carries the refresh token**, so no code path can forward it.
+- **D5: the page's lead is the shorter of 3 minutes and half the token's lifetime, and it waits at
+  least 5 seconds between calls.** With SweatStack's 15-minute tokens that is 3 minutes, as decided;
+  the half-lifetime rule keeps the script from calling in a loop if tokens were ever shorter than
+  6 minutes, and makes the end-to-end test's 40-second tokens work. A malformed answer is retried
+  after 30 seconds.
+- **D6: the record keeps the newest token by `expires_at`**, and a sign-out (D9) and an
+  `invalid_grant` remove it.
+- **D7: the floor for a token it hands out is 10 seconds, not "valid".** The library renews 5 seconds
+  before expiry, so a token closer to expiry would be asked for again at once. 30 seconds was weighed
+  and set aside: with short tokens a page's halfway refresh can produce a token with less left.
+- **D7: `/_proxy/` is reserved on the public app.** `/_proxy/token` there is a 404 from the proxy, not a
+  request to Streamlit (which would answer its page with 200).
+- **D8: the SDK's `_transport.get`.** The SDK sends every request through `_transport` so it carries
+  the SDK's User-Agent (a test enforces it); `_transport.get` joins `_transport.post` for the call to
+  the proxy. `_renew_access_token` is private as decided; a renewed token that has already expired is
+  an error, never a loop.
+- **D12: `serve()` takes `public_host`**, so the tests bind the public listener to loopback. The
+  module logger is named `proxy` (under `python proxy.py` the module is `__main__`), and `__main__`
+  configures logging, so D15's lines are visible under supervisord.
+- **D12: a missing `static/keepalive.js` stops the proxy at startup**, rather than leaving open pages
+  without renewal.
+- **Section 5: where the checks live.** The checks planned for `test_proxy_e2e.py` (headers, the two
+  endpoints, sign-out, the log) are in `test_sign_in_e2e.py` (T19 to T26), which already fakes
+  SweatStack and echoes what the app receives; `test_proxy_e2e.py` needs a generated project and
+  talks to the real SweatStack. `test_proxy_e2e.py` starts the proxy with `python proxy.py`; its
+  test cookie has no refresh token, so signing out never calls the real SweatStack.
+- **Section 5: the hidden tab.** Headless Chromium keeps running a "frozen" page's timers
+  (`Page.setWebLifecycleState`), so the test emulates the background: an init script holds back
+  only `keepalive.js`'s timers while the tab is hidden and fires `visibilitychange` when it is shown.
+  The clock test shifts the page's `Date` by 10 minutes.
+- **Mutation checks.** Each suite was run against deliberate breakage, and failed by name: no
+  `Set-Cookie` on the `101` (T24), the internal listener serving the public app (T22, T26), the
+  refresh token forwarded (T19, T24), `keepalive.js` disabled (checks 1, 3, 4, 6 and the timeout
+  count), no catch-up on `visibilitychange` (check 5 and the timeout count).
+- **Independent review.** A reviewer given the code and not this reasoning found two real bugs, both
+  fixed above with tests that fail on the old code (T27, T28 and T29 in `test_sign_in_e2e.py`; the
+  renewal test gained "Streamlit down past the grace period"): (1) a refresh whose response never
+  reached the browser (Streamlit restarting during an HTTP request or a WebSocket handshake, or a lost
+  keepalive answer) left the cookie with the retired token, and the 30-second reuse limit plus
+  SweatStack's 30-second grace period meant the next request more than 30 seconds later ended the
+  sign-in: a deploy slower than that would have signed out every open tab; (2) a refresh that timed
+  out after SweatStack committed it was answered 200, and the page's next call came too late for the
+  grace period. Also fixed: the waiter count of `/_proxy/token` could drift when a sign-out removed
+  the record during a wait, and a non-numeric `expires_in` raised an error.
+- **Also found and fixed:** `copier.yml` excluded `plans/`, which skips the files but still creates
+  an empty `plans` directory in every generated project; it now excludes `plans`.

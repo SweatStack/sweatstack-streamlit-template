@@ -109,6 +109,7 @@ Projects created with the **"Use this template"** button on GitHub, or with Copi
 | `.streamlit/config.toml` | Streamlit settings required for the proxy setup |
 | `static/sw.js` | Service worker that makes the app installable |
 | `static/install-banner.js` | "Install this app" banner for logged-in users |
+| `static/keepalive.js` | Has the proxy renew the sign-in while a page stays open |
 
 ## Why This Template Exists
 
@@ -116,8 +117,8 @@ Streamlit doesn't have good support for user sessions out of the box. This templ
 
 1. Handles the OAuth flow with SweatStack
 2. Stores tokens in encrypted, HTTP-only cookies
-3. Passes the access token (and, by default, the refresh token) to Streamlit as request headers
-4. Automatically refreshes tokens before they expire
+3. Passes the access token to Streamlit as a request header, and keeps the refresh token to itself
+4. Refreshes the sign-in before the access token expires, also while a page stays open for hours
 5. Makes the app installable as a PWA on iOS, Android and desktop
 
 Everything is configured with environment variables; see *Configuration* in the generated project's README.
@@ -140,8 +141,10 @@ Read the SweatStack Streamlit documentation [here](https://docs.sweatstack.no/le
 Install the [Fly.io CLI](https://fly.io/docs/flyctl/), then:
 
 ```bash
-fly launch
+fly launch --ha=false
 ```
+
+Run one machine: Streamlit keeps each user's session in one process's memory. `fly launch` creates two machines unless you pass `--ha=false`; for an app that already has two, run `fly scale count 1`.
 
 Create a production environment:
 

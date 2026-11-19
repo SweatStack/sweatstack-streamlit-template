@@ -71,7 +71,7 @@ The proxy (`proxy.py`) is configured entirely with environment variables. Only t
 | `ALLOW_SIGNUP` | `true` | Set to `false` to only let people with an existing SweatStack account log in (sends `email_auth_mode=existing_only` to SweatStack). |
 | `OAUTH_SCOPES` | `activities:read sharing:read profile` | What the app asks access to, separated by spaces. See [Data Access](#data-access). |
 | `PWA_INSTALL_BANNER` | `true` | Show logged-in users a banner inviting them to install the app. See [Installable app (PWA)](#installable-app-pwa). |
-| `UPSTREAM_URL` | `http://localhost:8501` | Where the proxy reaches Streamlit inside the container. You shouldn't need to change this. |
+| `UPSTREAM_URL` | `http://127.0.0.1:8501` | Where the proxy reaches Streamlit inside the container. You shouldn't need to change this. |
 
 On/off settings accept `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`. An unrecognised value is ignored with a warning in the logs, and the default applies.
 
@@ -97,34 +97,29 @@ Each of these except `profile` needs a purpose on the app's **Consent screen** t
 
 ## Tokens in Your App
 
-The proxy keeps the user's SweatStack tokens in an encrypted, HTTP-only cookie: the browser stores it, but neither the browser's JavaScript nor your Streamlit code can read it. Instead, the proxy passes the tokens to Streamlit as request headers:
+The proxy keeps the user's SweatStack tokens in an encrypted, HTTP-only cookie: the browser stores it, but neither the browser's JavaScript nor your Streamlit code can read it. The proxy is the only holder of the refresh token. It passes Streamlit the access token and a session id as request headers:
 
 | Header | Contains | When |
 |--------|----------|------|
 | `X-SweatStack-Token` | Access token (short-lived, about 15 minutes) | The user is logged in |
-| `X-SweatStack-Refresh-Token` | Refresh token (long-lived) | The user is logged in |
+| `X-SweatStack-Session` | The proxy's id for this sign-in; `auth.client` sends it back to the proxy to get a newer access token | The user is logged in |
 
-`StreamlitAuth.behind_proxy()` reads both headers, so most apps never touch them. Its `auth.client` renews the access token when it expires and remembers the renewed token for the rest of the session, so an app left open for hours (for example an installed app in the background) keeps working.
+`StreamlitAuth.behind_proxy()` reads both headers, so most apps never touch them. While the page is open, a small script (`static/keepalive.js`) has the proxy renew the sign-in shortly before the access token expires; when it has expired, `auth.client` asks the proxy for the new one and remembers it for the rest of the session. So an app left open for hours (for example an installed app in the background) keeps working, without the app ever holding the user's refresh token.
 
 Two rules keep that working:
 
 - **Call `StreamlitAuth.behind_proxy()` at the top of every run**, as `streamlit_app.py` does.
 - **Don't keep `auth` or `auth.client` between runs**, e.g. in `st.cache_resource` or a module-level variable. Create them on every run; the library takes care of remembering tokens.
 
-**You can trust these headers.** The proxy removes any `X-SweatStack-*` header sent by the browser before adding its own, so these headers only ever contain what the proxy put there. That holds only for traffic that goes through the proxy: never expose Streamlit's own port (8501) publicly. The included `Dockerfile` and `fly.toml` only expose the proxy (port 8080).
+**You can trust these headers.** The proxy removes any `X-SweatStack-*` header sent by the browser before adding its own, so these headers only ever contain what the proxy put there. That holds only for traffic that goes through the proxy, which is why Streamlit listens on `127.0.0.1` inside the container (see `supervisord.conf`): only the proxy can reach it. The proxy's port 8080 is the only one reachable from outside; its internal port 8081, where Streamlit asks for new access tokens, listens on `127.0.0.1` too. Keep it that way if you change `supervisord.conf`.
 
-### Using the refresh token yourself
+### Work outside a user's session
 
-The refresh token is useful for work that happens *outside* a user's session, such as processing a webhook or running a scheduled job for a user who isn't using the app. A typical setup saves it when the user opens the app and uses it later from a background job:
+The proxy gives the app no refresh token. SweatStack rotates refresh tokens: every renewal returns a new one and retires the old one, and using a retired token again ends the user's sign-in. So a sign-in can have only one holder, and in this template that is the proxy's cookie.
 
-```python
-refresh_token = st.context.headers.get("X-SweatStack-Refresh-Token")
-```
+Work that happens *outside* a user's session, such as processing a webhook or running a scheduled job for a user who isn't using the app, therefore needs a sign-in of its own, kept in one store of your own that every process reads and writes; the `sweatstack` library's `Client(on_refresh=...)` saves each renewed token there. This template doesn't provide that store.
 
-- **Save it again on every session**, overwriting the stored copy. The user ID is the `sub` claim of the access token.
-- **Refreshing doesn't replace it.** SweatStack returns the same refresh token when you refresh, so your background job and the user's session never invalidate each other. If a refresh response your job receives ever contains a different refresh token, store that one and use it from then on.
-- **Expect `invalid_grant` errors**, for example when a user revokes your app's access. Mark that user as "needs to log in again" and stop retrying; it's an ordinary event, not an outage.
-- **Treat it like a password.** It gives long-term access to the user's data. Never show it in the UI or write it to logs, and remember that `st.write(st.context.headers)` or an error tracker that records request headers would expose it. If you store it, encrypt it at rest.
+**If your app stored `X-SweatStack-Refresh-Token`** (template 0.3.0 and earlier forwarded it), delete the stored copies and stop using them: each one belongs to a user's browser sign-in, and using it now signs that user out of your app.
 
 ## Installable App (PWA)
 
@@ -176,8 +171,10 @@ For production:
 Install the [Fly.io CLI](https://fly.io/docs/flyctl/), then:
 
 ```bash
-fly launch
+fly launch --ha=false
 ```
+
+**Run one machine.** Streamlit keeps each user's session in the memory of one process, and so does the proxy with the latest access token it hands to that session; with two machines, a user's requests can land on the one that doesn't have them. `fly launch` creates two machines unless you pass `--ha=false`. For an app that already has two, run `fly scale count 1`.
 
 Create a production environment file:
 

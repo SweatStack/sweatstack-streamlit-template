@@ -18,6 +18,38 @@ Types of changes:
 Releases are not tagged. `copier update` always moves a project to the latest commit on `main`, and each release below is identified by its version and date. To update a project, follow [UPGRADING.md](UPGRADING.md) together with the **Upgrade notes** of each release you cross.
 
 
+## [0.4.0] - 2026-11-19
+
+Ready for SweatStack's rotating refresh tokens: every renewal now returns a new refresh token and retires the old one, and SweatStack will end a sign-in whose retired token is used again. Until this release, both the proxy and every Streamlit session held the refresh token, so users would have been signed out. Now only the proxy holds it. Requires `sweatstack` `0.103.0` or later.
+
+**Update before the date SweatStack gives you for your app. If your app stores `X-SweatStack-Refresh-Token`, do the first upgrade note before you deploy.**
+
+### Changed
+- **Only the proxy holds the refresh token.** Streamlit gets the access token and a session id (`X-SweatStack-Session`). When a session's access token expires, `auth.client` asks the proxy for the newer one instead of renewing on its own. Apps that use `auth.client` need no change.
+- **Open pages keep the sign-in fresh.** A small script on signed-in pages (`static/keepalive.js`) has the proxy renew the sign-in shortly before the access token expires, and again when a tab comes back from the background. Tabs left open for hours keep working, as before.
+- **The proxy runs with `python proxy.py`** (in `supervisord.conf`), which listens on port 8080 for browsers and on `127.0.0.1:8081` for Streamlit's token requests.
+- **Run one machine.** The README's Fly.io section now says `fly launch --ha=false`: Streamlit keeps sessions in one process's memory, and so does the proxy with the tokens it hands to them.
+
+### Fixed
+- **The cookie always holds the newest refresh token.** A refresh during the WebSocket handshake didn't update the cookie, and neither did a renewal inside a Streamlit session; the cookie kept a refresh token SweatStack had already retired.
+
+### Security
+- **Sign-out ends the sign-in at SweatStack**, by revoking the refresh token, not only in this browser.
+- **Streamlit listens on `127.0.0.1` only.** It listened on every interface of the container, where other apps in the same Fly.io organisation could reach it, bypassing the proxy and its headers.
+
+### Removed
+- **The `X-SweatStack-Refresh-Token` header.** The proxy no longer gives the app the user's refresh token: a second holder of a sign-in is exactly what SweatStack's rotation forbids. (`select_user()` still gets a token pair of its own, which is a sign-in of its own.) See "Work outside a user's session" in the README.
+
+### Upgrade notes
+1. **If your app stored `X-SweatStack-Refresh-Token`** (as "Using the refresh token yourself" in the README described, e.g. for background jobs), stop using the stored tokens and delete them before you deploy. Each one belongs to a user's browser sign-in: once SweatStack enforces rotation, using it signs that user out of your app. Work outside a session needs a sign-in of its own; see "Work outside a user's session" in the README.
+2. **Upgrade `sweatstack`**: after `copier update`, run `uv lock --upgrade-package sweatstack`, check that `uv.lock` now has `0.103.0` or later, and redeploy.
+3. **If you changed `supervisord.conf`**, keep the template's two commands: the proxy runs with `uv run python proxy.py` and Streamlit with `--server.address=127.0.0.1`. With the old `uvicorn proxy:app`, the proxy has no internal listener, and a tab left open past 15 minutes shows "Reload the page to continue".
+4. **On Fly.io, run one machine**: `fly scale count 1` if `fly status` shows more.
+5. **If your `proxy.py` has changes of its own** that call `_encode_token_cookie` or `_get_valid_tokens`, or read `Tokens.refresh_token`: these changed. The cookie now carries a session id, and `Tokens` no longer has the refresh token.
+
+Signed-in users stay signed in through the update: a cookie from 0.3.0 is accepted and gets a session id at its next request.
+
+
 ## [0.3.0] - 2026-11-06
 
 **Do the first upgrade note before you deploy, or other people can't sign in.**

@@ -1,7 +1,8 @@
 """
 End-to-end test for the proxy + Streamlit stack using Playwright (real Chromium).
 
-Starts both Streamlit (port 8501) and the FastAPI proxy (port 8080),
+Starts both Streamlit (127.0.0.1:8501) and the proxy (port 8080, and its internal listener on
+127.0.0.1:8081) the way supervisord does,
 then opens a real browser to verify the full stack works — including
 WebSocket connections with real browser headers (Origin, etc.).
 
@@ -41,13 +42,7 @@ def start_streamlit() -> subprocess.Popen:
 
 def start_proxy() -> subprocess.Popen:
     return subprocess.Popen(
-        [
-            sys.executable, "-m", "uvicorn", "proxy:app",
-            "--host", "127.0.0.1",
-            "--port", str(PROXY_PORT),
-            "--loop", "asyncio",
-            "--log-level", "warning",
-        ],
+        [sys.executable, "proxy.py"],
         env={
             **os.environ,
             "SECRET_KEY": os.environ.get("SECRET_KEY", "test-secret-key"),
@@ -232,11 +227,14 @@ def test_with_browser() -> bool:
 
 
 def _login_cookie() -> dict:
-    """A token cookie the proxy accepts, encrypted with the same SECRET_KEY it uses."""
+    """A token cookie the proxy accepts, encrypted with the same SECRET_KEY it uses.
+
+    Without a refresh token, so that signing out never calls the real SweatStack.
+    """
     os.environ.setdefault("SECRET_KEY", "test-secret-key")
     import proxy
 
-    value = proxy._encode_token_cookie("dummy-access", "dummy-refresh", time.time() + 600)
+    value = proxy._encode_token_cookie("dummy-access", "", time.time() + 600, "sid_dummy")
     return {"name": proxy.TOKEN_COOKIE_NAME, "value": value, "url": f"http://localhost:{PROXY_PORT}"}
 
 

@@ -52,7 +52,7 @@ This covers projects created with GitHub's "Use this template" button, by copyin
 
 Decide per file:
 
-- **Infrastructure files** (`proxy.py`, `Dockerfile`, `supervisord.conf`, `.streamlit/config.toml`, `static/sw.js`, `static/install-banner.js`): **start from the template's version.** Keeping these files identical to the template is what makes future updates painless. To take the template's version of a file, check out the version Copier just updated to and copy the file:
+- **Infrastructure files** (`proxy.py`, `Dockerfile`, `supervisord.conf`, `.streamlit/config.toml`, `static/sw.js`, `static/install-banner.js`, `static/keepalive.js`): **start from the template's version.** Keeping these files identical to the template is what makes future updates painless. To take the template's version of a file, check out the version Copier just updated to and copy the file:
   ```bash
   git -C ../sweatstack-template checkout --quiet "$(sed -n 's/^_commit: //p' .copier-answers.yml)"
   cp ../sweatstack-template/proxy.py proxy.py
@@ -75,7 +75,7 @@ Check the upgrade notes for new, changed or removed environment variables, inclu
 2. **The infrastructure files match the template**, apart from the changes you kept on purpose:
    ```bash
    git -C ../sweatstack-template checkout --quiet "$(sed -n 's/^_commit: //p' .copier-answers.yml)"
-   for f in proxy.py Dockerfile supervisord.conf .streamlit/config.toml static/sw.js static/install-banner.js; do
+   for f in proxy.py Dockerfile supervisord.conf .streamlit/config.toml static/sw.js static/install-banner.js static/keepalive.js; do
      diff -u "../sweatstack-template/$f" "$f"
    done
    ```

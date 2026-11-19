@@ -8,7 +8,9 @@ import json
 import logging
 import mimetypes
 import os
+import socket
 from collections.abc import Coroutine
+from dataclasses import dataclass, field
 from pathlib import Path
 import secrets
 import time
@@ -16,14 +18,18 @@ from typing import Any, NamedTuple
 from urllib.parse import quote, urlencode
 
 import httpx
+import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from PIL import Image, ImageColor
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.websockets import WebSocketState
 from websockets.asyncio.client import ClientConnection, connect as ws_connect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-logger = logging.getLogger(__name__)
+# Named, not __name__: `python proxy.py` runs this module as __main__.
+logger = logging.getLogger("proxy")
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -45,11 +51,18 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 # Configuration
-UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://localhost:8501")
+# 127.0.0.1, not localhost: Streamlit listens on IPv4 loopback only, and localhost may resolve to ::1.
+UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://127.0.0.1:8501")
 APP_URL = os.getenv("APP_URL", "http://localhost:8080")
 SWEATSTACK_BASE_URL = "https://app.sweatstack.no"
 SWEATSTACK_AUTHORIZE_URL = f"{SWEATSTACK_BASE_URL}/oauth/authorize"
 SWEATSTACK_TOKEN_URL = f"{SWEATSTACK_BASE_URL}/api/v1/oauth/token"
+SWEATSTACK_REVOKE_URL = f"{SWEATSTACK_BASE_URL}/api/v1/oauth/revoke"
+
+# Browsers connect to the public port. Streamlit asks for a newer access token on the internal
+# port, which listens on loopback only: nothing outside the container can reach it.
+PUBLIC_PORT = 8080
+INTERNAL_PORT = 8081
 
 SWEATSTACK_CLIENT_ID = os.getenv("SWEATSTACK_CLIENT_ID")
 SWEATSTACK_CLIENT_SECRET = os.getenv("SWEATSTACK_CLIENT_SECRET")
@@ -94,15 +107,36 @@ OAUTH_SCOPES = _parse_oauth_scopes(os.getenv("OAUTH_SCOPES", ""))
 
 if os.getenv("FORWARD_REFRESH_TOKEN") is not None:
     logger.warning(
-        "FORWARD_REFRESH_TOKEN is no longer supported and is ignored: the refresh token is "
-        "always forwarded, because the app needs it to renew the access token during long sessions."
+        "FORWARD_REFRESH_TOKEN is no longer supported and is ignored: the refresh token is never "
+        "forwarded. Only the proxy holds it; the app gets fresh access tokens from the proxy."
     )
 
 # Headers the proxy sets on every request to Streamlit. Any client-supplied
 # header with this prefix is dropped, so the app can trust these values.
 SWEATSTACK_HEADER_PREFIX = "x-sweatstack-"
 TOKEN_HEADER = "X-SweatStack-Token"
-REFRESH_TOKEN_HEADER = "X-SweatStack-Refresh-Token"
+# Names the browser's sign-in to the proxy. Streamlit sends it back to /_proxy/token.
+SESSION_HEADER = "X-SweatStack-Session"
+# Required on POST /_proxy/refresh: a cross-site form cannot set a custom header.
+REFRESH_REQUEST_HEADER = "X-SweatStack-Refresh"
+
+# The page asks for a refresh when the access token expires within this time (keepalive.js asks
+# 3 minutes before expiry, so a throttled timer in a hidden tab still comes in time).
+PAGE_REFRESH_WINDOW_SECONDS = 5 * 60
+# How long /_proxy/token waits for the page to refresh before it answers 404.
+SESSION_TOKEN_WAIT_SECONDS = 10
+# /_proxy/token never hands out a token that expires sooner than this: the library would take it
+# for expired (it renews 5 s early) and ask again at once.
+SESSION_TOKEN_MIN_LIFETIME_SECONDS = 10
+# A refresh's result is kept until the next refresh of the sign-in replaces it, and at most this
+# long. A request that presents the refresh token it retired gets that result again, without asking
+# SweatStack: its cookie is from before the response that carried the new one, which may never have
+# reached the browser (a failed upstream, a lost response). SweatStack's own grace period is only
+# 30 seconds; after it, presenting a retired token ends the sign-in.
+LAST_REFRESH_KEPT_SECONDS = 24 * 60 * 60
+SESSION_SWEEP_INTERVAL_SECONDS = 60
+REVOKE_TIMEOUT_SECONDS = 5
+TOKEN_REQUEST_TIMEOUT_SECONDS = 15
 
 HOP_BY_HOP_HEADERS = frozenset({
     "connection",
@@ -182,6 +216,7 @@ SPLASH_SIZES = frozenset((width * ratio, height * ratio) for width, height, rati
 SPLASH_ICON_PATH = STATIC_DIR / "icon-512x512.png"
 SERVICE_WORKER_PATH = STATIC_DIR / "sw.js"
 INSTALL_BANNER_PATH = STATIC_DIR / "install-banner.js"
+KEEPALIVE_PATH = STATIC_DIR / "keepalive.js"
 
 
 def _build_pwa_head_tags() -> str:
@@ -233,6 +268,9 @@ _LOGIN_NEXT_SCRIPT = (
 def _build_head_html(authenticated: bool) -> str:
     """HTML injected at the start of <head> of every HTML page served through the proxy."""
     parts = [_LOGIN_NEXT_SCRIPT]
+    if authenticated:
+        # Keeps the sign-in fresh while the page is open; see static/keepalive.js.
+        parts.append(f'<script src="{_versioned_static_url(KEEPALIVE_PATH)}" defer></script>')
     if MANIFEST is not None:
         parts.append(_build_pwa_head_tags())
         if PWA_INSTALL_BANNER and INSTALL_BANNER_PATH.is_file():
@@ -263,12 +301,23 @@ def _get_fernet() -> Fernet:
     return Fernet(base64.urlsafe_b64encode(key))
 
 
-def _encode_token_cookie(access_token: str, refresh_token: str, expires_at: float) -> str:
+def _new_session_id() -> str:
+    """128 random bits naming one sign-in in this browser; minted at sign-in, kept across refreshes."""
+    return secrets.token_urlsafe(16)
+
+
+def _log_id(sid: str | None) -> str:
+    """What the log says instead of the session id, which must never be logged."""
+    return hashlib.sha256(sid.encode()).hexdigest()[:8] if sid else "-"
+
+
+def _encode_token_cookie(access_token: str, refresh_token: str, expires_at: float, sid: str) -> str:
     """Encrypt token data for cookie storage."""
     data = json.dumps({
         "access_token": access_token,
         "refresh_token": refresh_token,
         "expires_at": expires_at,
+        "sid": sid,
     })
     return _get_fernet().encrypt(data.encode()).decode()
 
@@ -295,67 +344,205 @@ def _set_token_cookie(response: Response, cookie_value: str) -> None:
     )
 
 
-async def _refresh_access_token(refresh_token: str) -> TokenData | None:
-    """Exchange refresh token for new access token."""
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            SWEATSTACK_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": SWEATSTACK_CLIENT_ID,
-                "client_secret": SWEATSTACK_CLIENT_SECRET,
-            },
-        )
-        if response.status_code == 200:
-            logger.info("Token refresh successful")
-            return response.json()
-        logger.warning("Token refresh failed: status=%d", response.status_code)
-    return None
-
-
-class Tokens(NamedTuple):
-    """The user's current tokens, as resolved from the token cookie."""
+class Refreshed(NamedTuple):
+    """A refresh's result: the new tokens, or why there are none."""
 
     access_token: str | None = None
     refresh_token: str | None = None
-    # Set when the tokens were refreshed and the cookie must be rewritten.
-    new_cookie: str | None = None
+    expires_at: float = 0.0
+    # SweatStack refused the refresh token (invalid_grant): the sign-in is over.
+    signed_out: bool = False
 
 
-async def _get_valid_tokens(cookies: dict[str, str]) -> Tokens:
-    """Read the tokens from the cookie, refreshing them first if the access token is (nearly) expired.
+async def _refresh_access_token(refresh_token: str) -> Refreshed:
+    """Exchange the refresh token for new tokens. SweatStack rotates the refresh token every time."""
+    try:
+        async with httpx.AsyncClient(timeout=TOKEN_REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                SWEATSTACK_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": SWEATSTACK_CLIENT_ID,
+                    "client_secret": SWEATSTACK_CLIENT_SECRET,
+                },
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("token refresh failed: %s", type(exc).__name__)
+        return Refreshed()
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        body = {}
+    if response.status_code == 200 and body.get("access_token"):
+        expires_in = body.get("expires_in")
+        if not isinstance(expires_in, (int, float)) or isinstance(expires_in, bool):
+            expires_in = DEFAULT_TOKEN_EXPIRY_SECONDS
+        return Refreshed(
+            access_token=body["access_token"],
+            # A server that does not rotate sends none: keep the old one.
+            refresh_token=body.get("refresh_token") or refresh_token,
+            expires_at=time.time() + expires_in,
+        )
+    if response.status_code in (400, 401) and body.get("error") == "invalid_grant":
+        return Refreshed(signed_out=True)
+    logger.warning("token refresh failed: status=%d error=%s", response.status_code, body.get("error"))
+    return Refreshed()
 
-    Returns empty ``Tokens`` when the user is not logged in or the refresh fails.
+
+@dataclass
+class _Session:
+    """What the proxy remembers, in memory, about one sign-in (one session id).
+
+    A cache only: after a restart it is empty, and every cookie the proxy reads fills it again.
     """
-    cookie_value = cookies.get(TOKEN_COOKIE_NAME)
-    if not cookie_value:
-        return Tokens()
 
-    token_data = _decode_token_cookie(cookie_value)
+    # Serializes the refreshes of this sign-in within the process.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The newest access token the proxy has seen for this sign-in, for Streamlit (/_proxy/token).
+    access_token: str | None = None
+    expires_at: float = 0.0
+    # Set when a newer access token arrives, then replaced; /_proxy/token waits on it.
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    waiters: int = 0
+    # The last refresh: the digest of the refresh token it presented, its result, and when.
+    last_refresh: tuple[str, Refreshed, float] | None = None
+
+
+_sessions: dict[str, _Session] = {}
+_last_sweep = 0.0
+
+
+def _session(sid: str) -> _Session:
+    return _sessions.setdefault(sid, _Session())
+
+
+def _remember(sid: str, access_token: str, expires_at: float) -> None:
+    """Keep the newest access token of a sign-in for Streamlit; an older one never replaces it."""
+    record = _session(sid)
+    if expires_at > record.expires_at:
+        record.access_token, record.expires_at = access_token, expires_at
+        record.changed.set()
+        record.changed = asyncio.Event()
+    _sweep()
+
+
+def _sweep() -> None:
+    """Drop the records of sign-ins nobody uses: token expired, no refresh running, nobody waiting.
+
+    Runs at most once a minute, on a write.
+    """
+    global _last_sweep
+    now = time.time()
+    if now - _last_sweep < SESSION_SWEEP_INTERVAL_SECONDS:
+        return
+    _last_sweep = now
+    for sid, record in list(_sessions.items()):
+        kept = record.last_refresh is not None and now - record.last_refresh[2] < LAST_REFRESH_KEPT_SECONDS
+        if record.expires_at < now and not record.lock.locked() and record.waiters == 0 and not kept:
+            del _sessions[sid]
+
+
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def _refresh(sid: str, refresh_token: str, via: str, refresh_within: float) -> Refreshed:
+    """Refresh one sign-in, one refresh at a time.
+
+    A request that presents the refresh token the last refresh retired gets that refresh's result
+    again, without asking SweatStack: its cookie is from before the response that carried the new
+    one, which may never have reached the browser. Should that result's access token itself need a
+    refresh by now, its refresh token, which SweatStack still takes, is refreshed instead.
+    """
+    record = _session(sid)
+    async with record.lock:
+        presented = refresh_token
+        last = record.last_refresh
+        if last and last[0] == _digest(presented) and time.time() - last[2] < LAST_REFRESH_KEPT_SECONDS:
+            if time.time() < last[1].expires_at - refresh_within:
+                logger.info("token refresh via=%s outcome=reused session=%s", via, _log_id(sid))
+                return last[1]
+            presented = last[1].refresh_token or presented
+        result = await _refresh_access_token(presented)
+        if result.access_token:
+            record.last_refresh = (_digest(presented), result, time.time())
+            _remember(sid, result.access_token, result.expires_at)
+            outcome = "ok"
+        else:
+            outcome = "invalid_grant" if result.signed_out else "error"
+        log = logger.info if outcome == "ok" else logger.warning
+        log("token refresh via=%s outcome=%s session=%s", via, outcome, _log_id(sid))
+        return result
+
+
+class Tokens(NamedTuple):
+    """The user's current access token, as resolved from the token cookie.
+
+    The refresh token is deliberately not here: it never leaves the cookie and the refresh.
+    """
+
+    access_token: str | None = None
+    sid: str | None = None
+    expires_at: float = 0.0
+    # Set when the cookie must be rewritten: after a refresh, or to add a session id.
+    new_cookie: str | None = None
+    # The sign-in is over (SweatStack refused the refresh token): delete the cookie.
+    signed_out: bool = False
+    # A refresh was needed and failed for another reason (network, SweatStack down): try again later.
+    failed: bool = False
+
+
+def _read_token_cookie(cookies: dict[str, str]) -> TokenData | None:
+    cookie_value = cookies.get(TOKEN_COOKIE_NAME)
+    return _decode_token_cookie(cookie_value) if cookie_value else None
+
+
+async def _get_valid_tokens(
+    cookies: dict[str, str],
+    *,
+    via: str,
+    refresh_within: float = TOKEN_REFRESH_THRESHOLD_SECONDS,
+) -> Tokens:
+    """Read the tokens from the cookie, refreshing them first if the access token expires within
+    ``refresh_within`` seconds.
+
+    Only call this where the response can rewrite the cookie (``new_cookie``): a refresh retires
+    the refresh token the cookie holds.
+    """
+    token_data = _read_token_cookie(cookies)
     if not token_data:
         return Tokens()
 
     access_token = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token") or None
     expires_at = token_data.get("expires_at", 0)
+    sid = token_data.get("sid")
+    new_cookie = None
+    if not sid:  # a cookie from before 0.4.0: give it a session id
+        sid = _new_session_id()
+        new_cookie = _encode_token_cookie(access_token, refresh_token or "", expires_at, sid)
 
-    if time.time() < expires_at - TOKEN_REFRESH_THRESHOLD_SECONDS:
-        return Tokens(access_token, refresh_token)
-
+    now = time.time()
+    still_valid = now < expires_at - TOKEN_REFRESH_THRESHOLD_SECONDS
+    if now < expires_at - refresh_within or (still_valid and not refresh_token):
+        _remember(sid, access_token, expires_at)
+        return Tokens(access_token, sid, expires_at, new_cookie)
     if not refresh_token:
-        return Tokens()
-    new_tokens = await _refresh_access_token(refresh_token)
-    if not new_tokens:
-        return Tokens()
+        return Tokens(signed_out=True)
 
-    new_access = new_tokens.get("access_token")
-    # Some OAuth servers rotate refresh tokens; keep the old one if none is returned.
-    new_refresh = new_tokens.get("refresh_token") or refresh_token
-    new_expires_in = new_tokens.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
-    new_expires_at = time.time() + new_expires_in
-    new_cookie = _encode_token_cookie(new_access, new_refresh, new_expires_at)
-    return Tokens(new_access, new_refresh, new_cookie)
+    result = await _refresh(sid, refresh_token, via, refresh_within)
+    if result.signed_out:
+        _sessions.pop(sid, None)
+        return Tokens(signed_out=True)
+    if not result.access_token:
+        if still_valid:
+            return Tokens(access_token, sid, expires_at, new_cookie, failed=True)
+        return Tokens(failed=True)
+    new_cookie = _encode_token_cookie(result.access_token, result.refresh_token, result.expires_at, sid)
+    return Tokens(result.access_token, sid, result.expires_at, new_cookie)
 
 
 def _build_upstream_url(path: str, query_string: str = "", websocket: bool = False) -> str:
@@ -373,10 +560,10 @@ def _prepare_upstream_headers(
     incoming_headers: dict[str, str],
     tokens: Tokens,
 ) -> dict[str, str]:
-    """Prepare headers for upstream request, injecting the user's tokens if available.
+    """Prepare headers for upstream request, injecting the user's access token and session id.
 
     Client-supplied X-SweatStack-* headers are always dropped, so these headers
-    only ever carry values set by the proxy.
+    only ever carry values set by the proxy. The refresh token is never forwarded.
     """
     headers = {
         name: value
@@ -387,8 +574,8 @@ def _prepare_upstream_headers(
     headers.pop("accept-encoding", None)
     if tokens.access_token:
         headers[TOKEN_HEADER] = tokens.access_token
-    if tokens.refresh_token:
-        headers[REFRESH_TOKEN_HEADER] = tokens.refresh_token
+        if tokens.sid:
+            headers[SESSION_HEADER] = tokens.sid
     return headers
 
 
@@ -603,7 +790,11 @@ async def _finish_verified_sign_in(request: Request, code: str | None, next_url:
         return response
 
     expires_at = time.time() + token_data.get("expires_in", DEFAULT_TOKEN_EXPIRY_SECONDS)
-    cookie_value = _encode_token_cookie(token_data["access_token"], token_data.get("refresh_token") or "", expires_at)
+    sid = _new_session_id()
+    cookie_value = _encode_token_cookie(
+        token_data["access_token"], token_data.get("refresh_token") or "", expires_at, sid
+    )
+    _remember(sid, token_data["access_token"], expires_at)
     response = RedirectResponse(url=next_url)
     response.delete_cookie(STATE_COOKIE_NAME)
     response.delete_cookie(AUTH_ATTEMPTED_COOKIE_NAME)
@@ -624,7 +815,7 @@ async def auth_callback(request: Request):
     if state_cookie and state_cookie == state:
         return await _finish_verified_sign_in(request, code, next_url)
 
-    tokens = await _get_valid_tokens(request.cookies)
+    tokens = await _get_valid_tokens(request.cookies, via="http")
     if tokens.access_token:
         response = RedirectResponse(url=next_url)
         if tokens.new_cookie:
@@ -641,13 +832,69 @@ async def auth_callback(request: Request):
     return _sign_in_failed_response(next_url)
 
 
+async def _revoke(refresh_token: str) -> None:
+    """End the sign-in at SweatStack (RFC 7009). Best effort: signing out never waits long or fails."""
+    data = {"token": refresh_token, "client_id": SWEATSTACK_CLIENT_ID}
+    if SWEATSTACK_CLIENT_SECRET:
+        data["client_secret"] = SWEATSTACK_CLIENT_SECRET
+    try:
+        async with httpx.AsyncClient(timeout=REVOKE_TIMEOUT_SECONDS) as client:
+            response = await client.post(SWEATSTACK_REVOKE_URL, data=data)
+    except httpx.HTTPError as exc:
+        logger.warning("revoke failed: %s", type(exc).__name__)
+        return
+    if response.status_code != 200:
+        logger.warning("revoke failed: status=%d", response.status_code)
+
+
 @app.get("/logout")
-async def logout():
-    """Clear the token cookie and redirect to root."""
+async def logout(request: Request):
+    """Sign out: end the sign-in at SweatStack, clear the token cookie and redirect to root."""
+    token_data = _read_token_cookie(request.cookies)
+    if token_data:
+        if refresh_token := token_data.get("refresh_token"):
+            await _revoke(refresh_token)
+        if sid := token_data.get("sid"):
+            _sessions.pop(sid, None)
     response = RedirectResponse(url="/")
     response.delete_cookie(TOKEN_COOKIE_NAME)
     logger.info("User logged out")
     return response
+
+
+@app.post("/_proxy/refresh")
+async def refresh_for_page(request: Request) -> Response:
+    """Keep the sign-in fresh for an open page (static/keepalive.js).
+
+    Refreshes when the access token expires within PAGE_REFRESH_WINDOW_SECONDS, rewrites the
+    cookie, and answers how long the access token is valid for, as a duration so that the
+    page's own clock does not matter. Without a sign-in, or once SweatStack has ended it: 401.
+    """
+    no_store = {"cache-control": "no-store"}
+    if request.headers.get(REFRESH_REQUEST_HEADER) != "1":
+        return JSONResponse({"detail": f"{REFRESH_REQUEST_HEADER}: 1 required"}, status_code=403, headers=no_store)
+    tokens = await _get_valid_tokens(request.cookies, via="refresh", refresh_within=PAGE_REFRESH_WINDOW_SECONDS)
+    if tokens.failed:
+        # Also when the old access token still works: SweatStack may have rotated the token
+        # without the answer arriving, and only a retry within its 30-second grace period gets
+        # the same new token back. The page retries in 10 seconds.
+        return JSONResponse({"detail": "refresh failed, try again"}, status_code=503, headers=no_store)
+    if tokens.access_token:
+        expires_in = max(0, int(tokens.expires_at - time.time()))
+        response = JSONResponse({"expires_in": expires_in}, headers=no_store)
+        if tokens.new_cookie:
+            _set_token_cookie(response, tokens.new_cookie)
+        return response
+    response = JSONResponse({"detail": "not signed in"}, status_code=401, headers=no_store)
+    response.delete_cookie(TOKEN_COOKIE_NAME)
+    return response
+
+
+@app.api_route("/_proxy/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+async def proxy_reserved(rest: str) -> Response:
+    """/_proxy/ belongs to the proxy. Anything else under it, such as /_proxy/token, which only
+    the internal listener serves, is a 404 here rather than a request to Streamlit."""
+    return Response(status_code=404)
 
 
 @app.get("/manifest.json")
@@ -729,7 +976,7 @@ async def http_proxy(full_path: str, request: Request) -> Response:
     """Proxy HTTP requests to upstream, injecting auth token if available."""
     query_string = request.scope.get("query_string", b"").decode()
 
-    tokens = await _get_valid_tokens(request.cookies)
+    tokens = await _get_valid_tokens(request.cookies, via="http")
     authenticated = bool(tokens.access_token)
 
     # Auto-redirect unauthenticated browser navigations to login.
@@ -747,19 +994,30 @@ async def http_proxy(full_path: str, request: Request) -> Response:
         # that a user who abandons the flow without completing it is still
         # auto-redirected when they retry, while an automatic redirect loop
         # (which always passes back through the callback) is still broken.
-        return RedirectResponse(url=f"/login?next={quote(next_url, safe='')}")
+        redirect = RedirectResponse(url=f"/login?next={quote(next_url, safe='')}")
+        if tokens.signed_out:
+            redirect.delete_cookie(TOKEN_COOKIE_NAME)
+        return redirect
 
     upstream_url = _build_upstream_url(full_path, query_string)
     headers = _prepare_upstream_headers(dict(request.headers), tokens)
     body = await request.body()
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        upstream_response = await client.request(
-            request.method,
-            upstream_url,
-            headers=headers,
-            content=body,
-        )
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            upstream_response = await client.request(
+                request.method,
+                upstream_url,
+                headers=headers,
+                content=body,
+            )
+    except httpx.HTTPError as exc:
+        # Streamlit is down or restarting. A refresh may already have rotated the refresh
+        # token, so this answer must still carry the new cookie.
+        logger.warning("upstream unavailable: %s", type(exc).__name__)
+        response = Response("Service unavailable", status_code=502, headers={"cache-control": "no-store"})
+        response.raw_headers.extend(_cookie_headers(tokens))
+        return response
 
     content = upstream_response.content
     content_type = upstream_response.headers.get("content-type", "")
@@ -786,6 +1044,8 @@ async def http_proxy(full_path: str, request: Request) -> Response:
 
     if tokens.new_cookie:
         _set_token_cookie(response, tokens.new_cookie)
+    elif tokens.signed_out:
+        response.delete_cookie(TOKEN_COOKIE_NAME)
 
     return response
 
@@ -851,17 +1111,26 @@ async def _pump_upstream_to_client(websocket: WebSocket, upstream: ClientConnect
         pass
 
 
+def _cookie_headers(tokens: Tokens) -> list[tuple[bytes, bytes]]:
+    """The Set-Cookie headers a response needs for these tokens, as raw ASGI headers."""
+    response = Response()
+    if tokens.new_cookie:
+        _set_token_cookie(response, tokens.new_cookie)
+    elif tokens.signed_out:
+        response.delete_cookie(TOKEN_COOKIE_NAME)
+    return [(name, value) for name, value in response.raw_headers if name == b"set-cookie"]
+
+
 @app.websocket("/{full_path:path}")
 async def websocket_proxy(websocket: WebSocket, full_path: str):
     """Proxy WebSocket connections to upstream with auth token."""
     query_string = websocket.scope.get("query_string", b"").decode()
     upstream_url = _build_upstream_url(full_path, query_string, websocket=True)
 
-    # If this refreshes the tokens, the new ones are used for this connection
-    # only; the cookie is not updated, so the next request refreshes again.
-    # That costs one extra token request and nothing else: SweatStack doesn't
-    # rotate refresh tokens, and the session renews its own access token.
-    tokens = await _get_valid_tokens(websocket.cookies)
+    # A refresh here rotates the refresh token, so the new cookie goes out on the
+    # 101 response that accepts the connection: the cookie never keeps a
+    # refresh token SweatStack has retired.
+    tokens = await _get_valid_tokens(websocket.cookies, via="websocket")
     headers, subprotocols = _prepare_ws_connection_args(dict(websocket.headers), tokens)
 
     try:
@@ -872,7 +1141,7 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
         ) as upstream:
             # Accept only after upstream connects — we need the negotiated
             # subprotocol, and there's no point accepting if upstream is down.
-            await websocket.accept(subprotocol=upstream.subprotocol)
+            await websocket.accept(subprotocol=upstream.subprotocol, headers=_cookie_headers(tokens))
 
             # The two directions are independent; the moment either one ends,
             # the connection is done and the other is cancelled — so a direction
@@ -883,3 +1152,119 @@ async def websocket_proxy(websocket: WebSocket, full_path: str):
             )
     except Exception:
         logger.exception("WebSocket proxy error for %s", full_path)
+        # A refresh may already have rotated the refresh token. If the connection was never
+        # accepted, accept it to deliver the new cookie on the 101, then close: the page reconnects.
+        cookie_headers = _cookie_headers(tokens)
+        if cookie_headers and websocket.client_state == WebSocketState.CONNECTING:
+            try:
+                await websocket.accept(headers=cookie_headers)
+                await websocket.close(code=1011)
+            except Exception:  # the browser is gone too: nothing left to deliver
+                pass
+
+
+# The internal app: served only on the internal listener (127.0.0.1:INTERNAL_PORT), for Streamlit.
+internal_app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+
+
+def _fresh_token(record: _Session | None, after: float) -> _Session | None:
+    """The record, if it holds an access token newer than ``after`` that is not about to expire."""
+    if record is None or record.access_token is None:
+        return None
+    if record.expires_at > max(after, time.time() + SESSION_TOKEN_MIN_LIFETIME_SECONDS):
+        return record
+    return None
+
+
+def _token_answer(record: _Session) -> JSONResponse:
+    return JSONResponse(
+        {"access_token": record.access_token, "expires_at": record.expires_at},
+        headers={"cache-control": "no-store"},
+    )
+
+
+@internal_app.get("/_proxy/token")
+async def session_token(request: Request) -> Response:
+    """A newer access token for a Streamlit session whose handshake token has expired.
+
+    Answers from memory: the newest token any refresh or cookie read has seen for the session
+    id. When there is none newer than ``after`` (the caller's token's expiry), it waits up to
+    SESSION_TOKEN_WAIT_SECONDS for the page to refresh, then answers 404. It never refreshes
+    itself: it has no cookie to rewrite, and the cookie must stay the only holder of the
+    refresh token.
+    """
+    sid = request.headers.get(SESSION_HEADER)
+    if not sid:
+        return JSONResponse({"detail": f"{SESSION_HEADER} required"}, status_code=400)
+    try:
+        after = float(request.query_params.get("after", "0"))
+    except ValueError:
+        return JSONResponse({"detail": "after must be a number"}, status_code=400)
+
+    if found := _fresh_token(_sessions.get(sid), after):
+        logger.info("session token outcome=fresh session=%s", _log_id(sid))
+        return _token_answer(found)
+
+    waiting = _session(sid)  # the record this request counts itself on
+    waiting.waiters += 1
+    deadline = time.monotonic() + SESSION_TOKEN_WAIT_SECONDS
+    try:
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                await asyncio.wait_for(_session(sid).changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if found := _fresh_token(_sessions.get(sid), after):
+                logger.info("session token outcome=waited session=%s", _log_id(sid))
+                return _token_answer(found)
+    finally:
+        waiting.waiters -= 1
+    logger.warning("session token outcome=timeout session=%s", _log_id(sid))
+    return JSONResponse({"detail": "no newer access token"}, status_code=404)
+
+
+def _dispatch(internal_port: int) -> ASGIApp:
+    """Route each connection by the listener it arrived on: the internal one to ``internal_app``.
+
+    ``scope["server"]`` is the local address of the socket the connection came in on, so this
+    does not depend on the caller's address or on any forwarded header.
+    """
+
+    async def dispatch(scope: Scope, receive: Receive, send: Send) -> None:
+        server = scope.get("server") or (None, None)
+        if scope["type"] in ("http", "websocket") and server[1] == internal_port:
+            await internal_app(scope, receive, send)
+        else:
+            await app(scope, receive, send)
+
+    return dispatch
+
+
+def _listen(host: str, port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(2048)
+    sock.set_inheritable(True)
+    return sock
+
+
+async def serve(
+    public_port: int = PUBLIC_PORT,
+    internal_port: int = INTERNAL_PORT,
+    *,
+    public_host: str = "0.0.0.0",
+    log_level: str = "info",
+) -> None:
+    """Run the proxy: browsers on public_host:public_port, Streamlit on 127.0.0.1:internal_port.
+
+    One process and one server for both, because /_proxy/token answers from this process's memory.
+    """
+    sockets = [_listen(public_host, public_port), _listen("127.0.0.1", internal_port)]
+    config = uvicorn.Config(_dispatch(internal_port), loop="asyncio", log_level=log_level)
+    await uvicorn.Server(config).serve(sockets=sockets)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
+    asyncio.run(serve())
